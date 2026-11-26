@@ -1298,7 +1298,12 @@ impl MobTimeline {
         });
         self.ticks = ticks;
         self.last_state_ms = now_ms;
-        self.position = pose.position;
+        // Only a place that goes out is the place the clients have: a state sent for a turn
+        // while the mob moved less than [`MOVE_EPSILON_M`] kept that small move, and many of
+        // them in a row were never sent.
+        if moved {
+            self.position = pose.position;
+        }
         if turn.is_some() {
             self.yaw = turn;
         }

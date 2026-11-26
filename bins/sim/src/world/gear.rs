@@ -241,6 +241,8 @@ pub(super) struct Gear {
     stowed: Option<(u32, Stow)>,
     /// The sheathe action puts the drawn weapon away at this time ([`Gear::sheathe`]).
     sheathe_at_ms: Option<u64>,
+    /// The tool slot whose tool is in the gather hand ([`Gear::hold_tool`]).
+    tool_in_hand: Option<u32>,
     /// The storage chests, the second container, the loadouts and the item counter.
     holdings: Holdings,
     /// The states last sent whole or changed: the next change goes out as the children that
@@ -274,6 +276,7 @@ impl Gear {
             told: Hands::default(),
             stowed: None,
             sheathe_at_ms: None,
+            tool_in_hand: None,
             holdings: Holdings::default(),
             sent: None,
         };
@@ -331,6 +334,7 @@ impl Gear {
             told: Hands::default(),
             stowed: None,
             sheathe_at_ms: None,
+            tool_in_hand: None,
             holdings: Holdings::default(),
             sent: None,
         };
@@ -392,18 +396,7 @@ impl Gear {
 
     /// The whole gear states.
     pub(super) fn states(&self) -> PlayerGear {
-        let equipped: Vec<EquippedItem> = self
-            .worn
-            .iter()
-            .map(|(slot_id, stack)| EquippedItem {
-                slot: *slot_id,
-                key: stack
-                    .as_ref()
-                    .and_then(|stack| stack.key)
-                    .unwrap_or_default(),
-                item: stack.as_ref().map(|stack| stack.item),
-            })
-            .collect();
+        let equipped = self.shown_worn();
         let bag: Vec<Option<GearItem>> = self
             .bag
             .iter()
@@ -845,20 +838,67 @@ impl Gear {
     }
 
     /// How the player holds its weapons, for the paperdoll.
-    /// The items that show on the player (armor and weapon options): what other players see.
+    /// The items that show on the player (armor, the tool in the gather hand and the weapon
+    /// options): what other players see.
     pub(super) fn visible_items(&self) -> Vec<EquippedItem> {
+        self.shown_worn()
+            .into_iter()
+            .filter(|worn| is_visible_slot(worn.slot))
+            .collect()
+    }
+
+    /// The worn entries as the paperdoll shows them, in their order: the tool in the gather hand
+    /// ([`Gear::hold_tool`]) in [`slot::GATHERABLE_HAND`], its own slot empty in its place.
+    fn shown_worn(&self) -> Vec<EquippedItem> {
+        let tool = self.tool_in_hand.and_then(|tool_slot| {
+            self.worn_stacks()
+                .find(|(slot_id, _)| *slot_id == tool_slot)
+                .map(|(_, stack)| stack)
+        });
         self.worn
             .iter()
-            .filter(|(slot_id, _)| is_visible_slot(*slot_id))
-            .map(|(slot_id, stack)| EquippedItem {
-                slot: *slot_id,
-                key: stack
-                    .as_ref()
-                    .and_then(|stack| stack.key)
-                    .unwrap_or_default(),
-                item: stack.as_ref().map(|stack| stack.item),
+            .map(|(slot_id, stack)| {
+                let stack = match *slot_id {
+                    tool_slot if Some(tool_slot) == self.tool_in_hand => None,
+                    slot::GATHERABLE_HAND => tool,
+                    _ => stack.as_ref(),
+                };
+                EquippedItem {
+                    slot: *slot_id,
+                    key: stack.and_then(|stack| stack.key).unwrap_or_default(),
+                    item: stack.map(|stack| stack.item),
+                }
             })
             .collect()
+    }
+
+    /// The worn tool of tool slot `tool_slot` goes into the gather hand (`None`: the tool in it
+    /// goes back to its slot); whether the paperdoll changed. A slot with nothing worn holds
+    /// nothing in the hand. Observed: retail `Fishing` at 1782652225355 (`FishingEquipped`
+    /// 1782652225405) showed the pole of hidden slot 37 in visible slot 9, its hidden record
+    /// empty in its place, slot 9 no longer sheathed and in the hand, every weapon option
+    /// sheathed; at `FishingUnequipped` (1782652274088) slot 9 showed empty again in its place
+    /// and the pole was back in slot 37. `12-1_getoffbeach-Soul-Survivor`, 1790514489260 to
+    /// 1790514576591: a player's public paperdoll showed `1hSkinningKnifeT2` in slot 9, in the
+    /// hand, in each gather and the drawn sword back in the hand after it. Inferred: the
+    /// pickaxe, the logging axe and the sickle do the same (no retail ledger holds their gather
+    /// with a paperdoll change).
+    pub(super) fn hold_tool(&mut self, tool_slot: Option<u32>) -> bool {
+        let tool_slot = tool_slot.filter(|slot_id| self.worn_item(*slot_id).is_some());
+        if tool_slot == self.tool_in_hand {
+            return false;
+        }
+        if tool_slot.is_some()
+            && !self
+                .worn
+                .iter()
+                .any(|(slot_id, _)| *slot_id == slot::GATHERABLE_HAND)
+        {
+            self.worn.push((slot::GATHERABLE_HAND, None));
+        }
+        self.tool_in_hand = tool_slot;
+        self.changed = true;
+        true
     }
 
     /// The version of the items other players see: the version of the states with the changes
@@ -868,7 +908,8 @@ impl Gear {
         self.version + self.changed as u64
     }
 
-    /// The weapon in the hand and the ammo.
+    /// The weapon in the hand and the ammo; while a tool is in the gather hand, that hand
+    /// ([`Gear::hold_tool`]: retail shows every weapon option sheathed then).
     pub(super) fn hands(&self) -> Hands {
         let off_hand = self
             .drawn
@@ -878,10 +919,14 @@ impl Gear {
             })
             .and_then(off_hand_of)
             .filter(|off_hand| self.worn_item(*off_hand).is_some());
+        let (drawn, attached, off_hand) = match self.tool_in_hand {
+            Some(_) => (Some(slot::GATHERABLE_HAND), true, None),
+            None => (self.drawn, self.attached, off_hand),
+        };
         Hands {
-            drawn: self.drawn,
+            drawn,
             active: Some(self.active),
-            attached: self.attached,
+            attached,
             off_hand,
             ammo: self.ammo.map(|ammo| {
                 Some(LoadedAmmo {
@@ -2164,6 +2209,121 @@ pub(crate) mod tests {
             time_ns,
         );
         gear
+    }
+
+    /// The changed elements of `list`.
+    fn changes<T: Clone>(list: Option<&ReplicatedList<T>>) -> Vec<(u32, T)> {
+        match list {
+            Some(ReplicatedList::Changes(changes)) => changes
+                .iter()
+                .map(|change| (change.index, change.value.clone()))
+                .collect(),
+            _ => Vec::new(),
+        }
+    }
+
+    /// Retail `Fishing`: the musket of weapon option 1 put away at the fishing key, the pole of
+    /// hidden slot 37 in the gather hand at 1782652225355 (sheathed `00 00 00 3f`, attached
+    /// `00 02 00 00`, visible slot 9 with the pole's visual, hidden slot 37 an empty record in
+    /// its place) and out of it at 1782652274088 (sheathed `00 02 00 3f`, nothing attached, the
+    /// visual of slot 9 empty in its place, the pole back in slot 37).
+    #[test]
+    fn a_tool_in_the_gather_hand_shows_in_slot_9_and_goes_back_to_its_slot() {
+        const MUSKET: &str = "2hMusketT1";
+        const POLE: &str = "2hFishingPoleT1";
+        const FISHING_SLOT: u32 = 37;
+        const IN_HAND_SHEATHED: SlotBits = SlotBits([0, 0, 0, 63, 0, 0, 0]);
+        const IN_HAND_ATTACHED: SlotBits = SlotBits([0, 2, 0, 0, 0, 0, 0]);
+        const PUT_AWAY_SHEATHED: SlotBits = SlotBits([0, 2, 0, 63, 0, 0, 0]);
+        const NOTHING_ATTACHED: SlotBits = SlotBits([0; 7]);
+        const TIME_NS: u64 = 1_782_652_224_871_000_000;
+        const LATER_MS: u64 = 1_000;
+        let kits = kits_with(&[
+            (MUSKET, "EquippableTwoHand+Musket"),
+            (POLE, "EquippableTool+FishingPole"),
+        ]);
+        let mut gear = Gear::starter(&kits, CHARACTER, Some(BACKSTORY)).expect("gear");
+        let musket = kits.item(MUSKET).expect("musket");
+        let pole = kits.item(POLE).expect("pole");
+        gear.renew(musket, 1, slot::MAIN_HAND_OPTION_1, TIME_NS);
+        gear.renew(pole, 1, FISHING_SLOT, TIME_NS);
+        assert!(gear.draw(0, 0, TIME_NS));
+        gear.tick_hands(LATER_MS, TIME_NS);
+        gear.take_change();
+        assert!(
+            !gear.hold_tool(Some(slot::GATHERABLE_HAND)),
+            "nothing worn there"
+        );
+        // The fishing key puts the musket away; the pole comes into the hand.
+        assert!(gear.put_away(TIME_NS, None));
+        assert!(gear.hold_tool(Some(FISHING_SLOT)));
+        assert!(!gear.hold_tool(Some(FISHING_SLOT)), "once");
+        let states = gear.take_change().expect("the client is told");
+        let public = states.paperdoll.public.as_ref().expect("public");
+        assert_eq!(public.sheathed, Some(IN_HAND_SHEATHED));
+        assert_eq!(public.attached, Some(IN_HAND_ATTACHED));
+        let [(shown_at, shown_slot)] = changes(public.visible_slots.as_ref())[..] else {
+            panic!("one new visible slot: {:?}", public.visible_slots);
+        };
+        assert_eq!(shown_slot, slot::GATHERABLE_HAND);
+        let visuals = changes(public.visuals.as_ref());
+        assert_eq!(
+            visuals
+                .iter()
+                .map(|(at, look)| (*at, look.item_index))
+                .collect::<Vec<_>>(),
+            [(shown_at, pole.item_index)]
+        );
+        let owner = states.paperdoll.owner.as_ref().expect("owner");
+        let hidden = changes(owner.hidden_items.as_ref());
+        let [(_, empty)] = hidden[..] else {
+            panic!("the pole's hidden record is emptied in its place: {hidden:?}");
+        };
+        assert_eq!(
+            (empty.quantity, empty.sync_reason),
+            (0, nw_messages::items::SYNC_REMOVED)
+        );
+        assert!(
+            owner.hidden_slots.is_none(),
+            "the hidden slots keep their order"
+        );
+        assert_eq!(
+            gear.visible_items()
+                .iter()
+                .find(|worn| worn.slot == slot::GATHERABLE_HAND)
+                .and_then(|worn| worn.item)
+                .map(|item| item.item_index),
+            Some(pole.item_index),
+            "the others see the pole"
+        );
+        assert_eq!(
+            gear.worn_item(FISHING_SLOT),
+            Some(POLE),
+            "still worn in its slot"
+        );
+        assert_eq!(gear.drawn(), None, "no weapon to shoot");
+        // The pole goes back: slot 9 stays, empty, in its place.
+        assert!(gear.hold_tool(None));
+        let states = gear.take_change().expect("the client is told");
+        let public = states.paperdoll.public.as_ref().expect("public");
+        assert_eq!(public.sheathed, Some(PUT_AWAY_SHEATHED));
+        assert_eq!(public.attached, Some(NOTHING_ATTACHED));
+        assert!(public.visible_slots.is_none(), "slot 9 keeps its place");
+        assert_eq!(
+            changes(public.visuals.as_ref())
+                .iter()
+                .map(|(at, look)| (*at, look.item_index))
+                .collect::<Vec<_>>(),
+            [(shown_at, 0)]
+        );
+        let owner = states.paperdoll.owner.as_ref().expect("owner");
+        assert_eq!(
+            changes(owner.hidden_items.as_ref())
+                .iter()
+                .map(|(_, record)| record.item_index)
+                .collect::<Vec<_>>(),
+            [pole.item_index]
+        );
     }
 
     #[test]

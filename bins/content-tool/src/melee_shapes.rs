@@ -384,14 +384,31 @@ pub fn root_path(
     body_clip: &AnimClip,
     length_s: f64,
 ) -> Result<(f64, RootPath), String> {
-    let body = bodies.clip(&body_clip.name)?;
+    root_path_on(
+        &bodies.player,
+        bodies.clip(&body_clip.name)?,
+        body_clip,
+        length_s,
+    )
+}
+
+/// The root path ([`root_path`]) of `body_clip`, whose clip file is `body`, on `skeleton`.
+///
+/// # Errors
+///
+/// Returns why when the clip has no frame time.
+pub fn root_path_on(
+    skeleton: &Skeleton,
+    body: &Caf,
+    body_clip: &AnimClip,
+    length_s: f64,
+) -> Result<(f64, RootPath), String> {
     let step_s = f64::from(body.frame_seconds()) / body_clip.speed;
     if step_s <= 0.0 {
         return Err(format!("animation {}: no frame time", body_clip.name));
     }
     let root_at = |time_s: f64| {
-        bodies
-            .player
+        skeleton
             .pose(body, frame_of(body_clip, body, time_s))
             .first()
             .copied()

@@ -286,6 +286,58 @@ impl<G: Ground> Ground for WalkMapGround<G> {
     }
 }
 
+/// A ground without the walk map's answers: the solids, the navigation marks and the water of
+/// the ground under it still close a place, the map's cells do not. A mob on its way home that
+/// finds no way over the map walks this ground (live 2026-11-26 00:17:08: a sailor of a beach
+/// camp stood in a cell of the map with no open cell beside it and reset every 3.5 s for
+/// minutes without a step home; the same search without the map gave a way of 4 points).
+#[derive(Clone, Copy)]
+pub struct OffMap<'a>(pub &'a dyn Ground);
+
+impl std::fmt::Debug for OffMap<'_> {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("OffMap")
+    }
+}
+
+impl Ground for OffMap<'_> {
+    fn height_at(&self, x: f32, y: f32) -> Option<f32> {
+        self.0.height_at(x, y)
+    }
+
+    fn floor_at(&self, x: f32, y: f32, z: f32) -> Option<f32> {
+        self.0.floor_at(x, y, z)
+    }
+
+    fn blocked(&self, from: Position, to: Position) -> bool {
+        self.0.blocked(from, to)
+    }
+
+    fn wall(&self, from: Position, to: Position) -> Option<[f32; 2]> {
+        self.0.wall(from, to)
+    }
+
+    fn first_solid(&self, from: Position, to: Position) -> Option<(Position, Option<u64>)> {
+        self.0.first_solid(from, to)
+    }
+
+    fn road_share(&self, x: f32, y: f32) -> f32 {
+        self.0.road_share(x, y)
+    }
+
+    fn water_surface(&self, x: f32, y: f32, sea_level_m: f32) -> Option<f32> {
+        self.0.water_surface(x, y, sea_level_m)
+    }
+
+    fn water_flags(&self, x: f32, y: f32) -> Option<u32> {
+        self.0.water_flags(x, y)
+    }
+
+    fn no_stand(&self, feet: Position) -> bool {
+        self.0.no_stand(feet) && !self.0.closed_by_walk_map(feet)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -399,6 +399,18 @@ pub struct StatusEffectRule {
     pub heal_mod: f64,
     /// `ConsumableHealMod`: the share added to the heals of the holder's consumables.
     pub consumable_heal_mod: f64,
+    /// `NonConsumableHealMod`: the share added to the other heals the holder gets (Sacred
+    /// Ground's `Status_Ability_Lifestaff_SacredGround_Upgrade2` 0.5,
+    /// `LifeStaff_IncreasedHealing_Passive` 0.1).
+    pub non_consumable_heal_mod: f64,
+    /// `HealScalingValueMultiplier`: the share the holder adds to the heals it gives whose
+    /// effect scales with the healer ([`Self::scales_with_healer`]): the attribute threshold
+    /// effect `ATB_Foc_Bonus_250_1_Effect` 0.01 a stack, the weapon perk
+    /// `Status_StatSwap_OutgoingHealing` 0.01, a disease below 0.
+    pub outgoing_heal_mod: f64,
+    /// `UseHealScalingValue`: its `HealthModifierDamageBased` heal grows with the healer's level,
+    /// Focus and outgoing heal mods (37 effects of build 25810808, the life staff's among them).
+    pub scales_with_healer: bool,
     /// `PhysicalArmor`: the share added to the holder's physical armor (the rend effects -0.02
     /// to -0.1).
     pub physical_armor: f64,
@@ -589,6 +601,12 @@ pub struct EffectSourceRow {
     pub heal_mod: Option<f64>,
     /// `ConsumableHealMod`.
     pub consumable_heal_mod: Option<f64>,
+    /// `NonConsumableHealMod`.
+    pub non_consumable_heal_mod: Option<f64>,
+    /// `HealScalingValueMultiplier`.
+    pub outgoing_heal_mod: Option<f64>,
+    /// `UseHealScalingValue` is set.
+    pub scales_with_healer: bool,
     /// `PhysicalArmor`.
     pub physical_armor: Option<f64>,
     /// `ElementalArmor`.
@@ -755,6 +773,9 @@ impl EffectSourceRow {
             crit_damage: row.crit_damage_modifier,
             heal_mod: row.heal_mod,
             consumable_heal_mod: row.consumable_heal_mod,
+            non_consumable_heal_mod: row.non_consumable_heal_mod,
+            outgoing_heal_mod: row.heal_scaling_value_multiplier,
+            scales_with_healer: row.use_heal_scaling_value.unwrap_or(false),
             physical_armor: row.physical_armor,
             elemental_armor: row.elemental_armor,
             health_rate: row.health_rate,
@@ -1022,6 +1043,9 @@ fn rule(
         crit_damage: row.crit_damage.unwrap_or(0.0),
         heal_mod: row.heal_mod.unwrap_or(0.0),
         consumable_heal_mod: row.consumable_heal_mod.unwrap_or(0.0),
+        non_consumable_heal_mod: row.non_consumable_heal_mod.unwrap_or(0.0),
+        outgoing_heal_mod: row.outgoing_heal_mod.unwrap_or(0.0),
+        scales_with_healer: row.scales_with_healer,
         physical_armor: row.physical_armor.unwrap_or(0.0),
         elemental_armor: row.elemental_armor.unwrap_or(0.0),
         health_rate: row.health_rate.unwrap_or(0.0),
@@ -1167,6 +1191,9 @@ mod tests {
             stagger_reduction: Some(0.5),
             attribute_mods: [Some(18), None, Some(12), None, None],
             heal_mod: Some(-0.05),
+            non_consumable_heal_mod: Some(0.5),
+            outgoing_heal_mod: Some(0.01),
+            scales_with_healer: true,
             physical_armor: Some(-0.1),
             control: Control {
                 stunned: true,
@@ -1190,6 +1217,11 @@ mod tests {
         assert_eq!(rule.stagger_reduction, 0.5);
         assert_eq!(rule.attribute_mods, [18, 0, 12, 0, 0]);
         assert_eq!((rule.heal_mod, rule.physical_armor), (-0.05, -0.1));
+        assert_eq!(
+            (rule.non_consumable_heal_mod, rule.outgoing_heal_mod),
+            (0.5, 0.01)
+        );
+        assert!(rule.scales_with_healer);
         assert!(!rule.control.may_dodge() && !rule.control.may_cast() && !rule.control.may_fight());
         assert!(rule.remove_on_deaths_door);
         assert_eq!(rule.on_death, vec![lowercase_crc32("ai_bleed_9")]);

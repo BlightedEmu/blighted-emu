@@ -11,7 +11,7 @@ use nw_content::container::{
     ContainerError, ContainerSpec, decode_value, encode_value, read_file, write_file,
 };
 use nw_content::layout::{AI_DATA, ContentLayout};
-use nw_content::player_attacks::Flight;
+use nw_content::player_attacks::{AttackMotion, Flight};
 use serde::{Deserialize, Serialize};
 
 use crate::node::{Node, NodeId, SelectPositionParams};
@@ -24,7 +24,7 @@ pub const AI_DATA_SPEC: ContainerSpec = ContainerSpec {
     schema_hash: SCHEMA_VERSION,
 };
 /// Raised when the body layout changes.
-const SCHEMA_VERSION: u32 = 8;
+const SCHEMA_VERSION: u32 = 10;
 
 /// One `.behaviortree` file.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -464,6 +464,46 @@ pub struct FragmentVariant {
     pub length: FragmentLength,
     /// Its procedural clips (`CAGE-Damage`, `CAGE-RangedAttack`, `Homing`, ...).
     pub windows: Vec<ProcWindow>,
+    /// The root motion of its main animation over its length (the skeleton root's ground-plane
+    /// offset from its place at the start, in the mob's frame then: right, forward; no
+    /// multiplier), for an entry of an action with a [`CageAction::motion_multiplier`] whose
+    /// root moves; `None` else.
+    #[serde(with = "root_motion_form")]
+    pub root_motion: Option<AttackMotion>,
+}
+
+/// How the file holds a root motion: its step and its offsets. A mob's root keeps no velocity,
+/// and the postcard body has no field names, so the fields that [`AttackMotion`] leaves out of
+/// its JSON when unset cannot be left out here.
+mod root_motion_form {
+    use nw_content::player_attacks::AttackMotion;
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+    /// A root motion's step (ms) and offsets.
+    type Form<'a> = (f32, &'a [[f32; 2]]);
+
+    pub fn serialize<S: Serializer>(
+        motion: &Option<AttackMotion>,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
+        motion
+            .as_ref()
+            .map(|motion| -> Form<'_> { (motion.step_ms, &motion.offsets) })
+            .serialize(serializer)
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<Option<AttackMotion>, D::Error> {
+        let form: Option<(f32, Vec<[f32; 2]>)> = Deserialize::deserialize(deserializer)?;
+        Ok(form.map(|(step_ms, offsets)| AttackMotion {
+            step_ms,
+            offsets,
+            inherit_velocity: false,
+            inherit_max_mps: None,
+            decel_mps2: [0.0; 2],
+        }))
+    }
 }
 
 /// One CAGE action: the grid action list `Action` whose `IfHTNCAGEAction` or
@@ -694,6 +734,115 @@ pub struct ProjectileSlice {
     pub flight: Flight,
 }
 
+/// The `m_arcTrajectorySettings` of a ranged attack whose `m_useArcTrajectories` is set: its
+/// lob height and its gravity grow from their least to their most as the target's distance
+/// grows from the least to the most lerp distance (Observed: `AI_Undead/Grenadier_Bomb` lob
+/// 0 to 0.4 m, gravity 10 to 15 m/s², over 3 to 4 m; every retail grenadier bomb thrown from
+/// 5 m or more sent `gravityOverride` 15, and 9 of 12 an upward speed of 3.46 m/s, the speed
+/// that rises 0.4 m under 15 m/s²: newchar-retail-2026-09-18 802.637 s, `12a_msq_22` 135.581 s).
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct ArcTrajectory {
+    /// `m_lobHeightMin`, `m_lobHeightMax`: how high the arc rises, m.
+    pub lob_height_m: [f32; 2],
+    /// `m_gravityOverrideMin`, `m_gravityOverrideMax`: the gravity of the projectile, m/s².
+    pub gravity_mps2: [f32; 2],
+    /// `m_distanceLerpMin`, `m_distanceLerpMax`: the target distances of the least and the most.
+    pub distance_m: [f32; 2],
+}
+
+impl ArcTrajectory {
+    /// The lob height (m) and the gravity (m/s²) of a throw at a target `distance_m` away.
+    pub fn at(&self, distance_m: f32) -> (f32, f32) {
+        let [near, far] = self.distance_m;
+        let share = if far > near {
+            ((distance_m - near) / (far - near)).clamp(0.0, 1.0)
+        } else if distance_m >= far {
+            1.0
+        } else {
+            0.0
+        };
+        let lerp = |[least, most]: [f32; 2]| least + (most - least) * share;
+        (lerp(self.lob_height_m), lerp(self.gravity_mps2))
+    }
+}
+
+/// Where an attack of the ranged attack database sits in it and how its projectile arcs.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct RangedAttackStream {
+    /// The profile.
+    pub profile: NameId,
+    /// The attack name.
+    pub attack: NameId,
+    /// The attack's flat index over all profiles in stream order, the projectile state's
+    /// `rangedAttackIndex` (Observed: 198 `AI_Undead/Grenadier_Bomb` in the grenadier bombs of
+    /// newchar-retail-2026-09-18 802.637 s, 204 `AI_Undead/Officer_Anchor` in the first mate's
+    /// anchor at 1247.540 s).
+    pub index: u64,
+    /// Its arc, when `m_useArcTrajectories` is set.
+    pub arc: Option<ArcTrajectory>,
+}
+
+/// A `DelayedEventComponent` of a slice: its replicated component and `m_timeDelaySeconds`.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct DelayedEvent {
+    /// Its component number (`m_replicationIndex`).
+    pub component: u64,
+    /// `m_timeDelaySeconds`.
+    pub delay_s: f32,
+}
+
+/// The slice a projectile spawns where it hits (`m_spawnOnHitAsset`) and the area hit it lands
+/// there: its damage component's `m_damageData` row on everyone in its shape's radius.
+/// Observed: the grenadier bomb's explosion (`Drowned_Miner_Bomb_Explosion` of
+/// `UndeadGrenadierDamageTable`, radius 2 m) and the first mate's anchor impact
+/// (`Anchor_Toss_Impact` of `DamnedFirstMateDamageTable`, radius 1.5 m).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ProjectileImpact {
+    /// The impact slice's asset GUID (sub id 2, its dynamic slice).
+    pub asset: [u8; 16],
+    /// `m_damageDataTable`: the unique id of the damage table of its hit.
+    pub table: NameId,
+    /// `m_damageDataEntry`: the row of its hit.
+    pub row: NameId,
+    /// The `m_radius` of its damage shape, m.
+    pub radius_m: f32,
+    /// The component of its ownership state, when it has one.
+    pub ownership_component: Option<u64>,
+    /// The component of its position state, when it has one.
+    pub position_component: Option<u64>,
+    /// Its delayed events, in component order.
+    pub delayed_events: Vec<DelayedEvent>,
+}
+
+/// The replicated entity of a projectile slice that a mob's ranged clip names: its asset, the
+/// components of its states (each `m_replicationIndex`) and what it spawns where it hits.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ProjectileEntity {
+    /// The slice (lower-case pak path).
+    pub slice: NameId,
+    /// Its asset GUID (sub id 2).
+    pub asset: [u8; 16],
+    /// The component of its projectile state (class 16).
+    pub projectile_component: u64,
+    /// `m_stuckLifetime`: how long it stays after a hit, s.
+    pub stuck_lifetime_s: f32,
+    /// The component of its ownership state, when it has one.
+    pub ownership_component: Option<u64>,
+    /// What it spawns and hits with where it hits, when it names a slice with a damage area.
+    pub impact: Option<ProjectileImpact>,
+}
+
+/// The row ids of a damage table in sheet order: a row's index is its projectile state's
+/// `damageTableRowIndex` (Observed: `Drowned_Miner_Bomb` is row 0 of `FTUEDamageTableMiner`,
+/// sent by newchar-retail-2026-09-18 at 802.637 s).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DamageTableRows {
+    /// The table's unique id.
+    pub table: NameId,
+    /// Its rows' `DamageID`s.
+    pub rows: Vec<NameId>,
+}
+
 /// A creature slice asset and its archetype.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Creature {
@@ -728,6 +877,12 @@ pub struct AiData {
     pub ranged_attacks: Vec<RangedAttack>,
     /// The projectiles of the slices the creatures' ranged clips name.
     pub projectile_slices: Vec<ProjectileSlice>,
+    /// The stream place and arc of every attack of the ranged attack database.
+    pub ranged_attack_streams: Vec<RangedAttackStream>,
+    /// The replicated entities of the projectile slices the creatures' ranged clips name.
+    pub projectile_entities: Vec<ProjectileEntity>,
+    /// The rows of the archetypes' damage tables.
+    pub damage_table_rows: Vec<DamageTableRows>,
 }
 
 impl AiData {
@@ -856,6 +1011,33 @@ impl AiData {
             .map(|known| known.flight)
     }
 
+    /// The stream place and arc of the attack `attack` of the ranged profile `profile`.
+    pub fn ranged_attack_stream(&self, profile: &str, attack: &str) -> Option<&RangedAttackStream> {
+        self.ranged_attack_streams
+            .iter()
+            .find(|known| self.name(known.profile) == profile && self.name(known.attack) == attack)
+    }
+
+    /// The replicated entity of the projectile slice `slice` (lower-case pak path).
+    pub fn projectile_entity(&self, slice: &str) -> Option<&ProjectileEntity> {
+        self.projectile_entities
+            .iter()
+            .find(|known| self.name(known.slice) == slice)
+    }
+
+    /// The index of row `row` in the damage table of unique id `table` (any case).
+    pub fn damage_row_index(&self, table: &str, row: &str) -> Option<u16> {
+        let rows = self
+            .damage_table_rows
+            .iter()
+            .find(|known| self.name(known.table).eq_ignore_ascii_case(table))?;
+        let index = rows
+            .rows
+            .iter()
+            .position(|known| self.name(*known).eq_ignore_ascii_case(row))?;
+        u16::try_from(index).ok()
+    }
+
     /// Reads the file of `layout`.
     ///
     /// # Errors
@@ -933,6 +1115,7 @@ mod tests {
                     end_s: Some(0.6),
                     params: vec![(1, 2)],
                 }],
+                root_motion: None,
             }],
             ..gore()
         };
@@ -963,6 +1146,7 @@ mod tests {
                 frag_tags: Vec::new(),
                 length: FragmentLength::Seconds(seconds),
                 windows: Vec::new(),
+                root_motion: None,
             }],
         };
         let stagger = CageAction {
@@ -1018,12 +1202,14 @@ mod tests {
                     frag_tags: Vec::new(),
                     length: FragmentLength::Loops,
                     windows: Vec::new(),
+                    root_motion: None,
                 },
                 FragmentVariant {
                     tags: Vec::new(),
                     frag_tags: Vec::new(),
                     length: FragmentLength::Seconds(GORE_FRAMES_S / GORE_SPEED),
                     windows: Vec::new(),
+                    root_motion: None,
                 },
             ],
             weapon_variants: Vec::new(),
@@ -1076,6 +1262,7 @@ mod tests {
             frag_tags: Vec::new(),
             length,
             windows: Vec::new(),
+            root_motion: None,
         };
         let turn = CageAction {
             variants: vec![
@@ -1125,6 +1312,7 @@ mod tests {
                     example(PI, HALF_LEFT_S),
                 ]),
                 windows: Vec::new(),
+                root_motion: None,
             }],
             ..gore()
         };
@@ -1219,12 +1407,23 @@ mod tests {
 
     #[test]
     fn the_file_round_trips() {
+        /// A gore entry that moves its body 0.3 m forward over two 1/30 s steps.
+        const STEP_MS: f32 = 1_000.0 / 30.0;
+        const ROOT_OFFSETS: [[f32; 2]; 3] = [[0.0, 0.0], [0.0, 0.1], [0.05, 0.3]];
         let dir = tempfile::tempdir().expect("dir");
         let dir = dir.path();
+        let mut moving = gore();
+        moving.variants[1].root_motion = Some(AttackMotion {
+            step_ms: STEP_MS,
+            offsets: ROOT_OFFSETS.to_vec(),
+            inherit_velocity: false,
+            inherit_max_mps: None,
+            decel_mps2: [0.0; 2],
+        });
         let data = AiData {
             names: vec!["a".into(), "b".into()],
             keys: vec![1],
-            cage_actions: vec![gore()],
+            cage_actions: vec![moving],
             grids: vec![Grid {
                 path: 0,
                 animation_database: None,
@@ -1243,5 +1442,79 @@ mod tests {
         std::fs::create_dir_all(other.file(AI_DATA).parent().expect("folder")).expect("dir");
         std::fs::copy(layout.file(AI_DATA), other.file(AI_DATA)).expect("copy");
         assert!(AiData::load(&other).is_err(), "other build");
+    }
+
+    /// `AI_Undead/Grenadier_Bomb`'s arc settings.
+    const GRENADIER_ARC: ArcTrajectory = ArcTrajectory {
+        lob_height_m: [0.0, 0.4],
+        gravity_mps2: [10.0, 15.0],
+        distance_m: [3.0, 4.0],
+    };
+
+    #[test]
+    fn an_arc_grows_from_its_least_to_its_most_over_its_lerp_distances() {
+        assert_eq!(GRENADIER_ARC.at(2.0), (0.0, 10.0));
+        let (lob_m, gravity) = GRENADIER_ARC.at(3.5);
+        assert!((lob_m - 0.2).abs() < 1e-6 && (gravity - 12.5).abs() < 1e-6);
+        assert_eq!(GRENADIER_ARC.at(8.0), (0.4, 15.0));
+        // `AI_Undead/Officer_Anchor`: 9.8 at every distance, lerp distances 0.
+        let anchor = ArcTrajectory {
+            lob_height_m: [0.0, 0.0],
+            gravity_mps2: [9.8, 9.8],
+            distance_m: [0.0, 0.0],
+        };
+        assert_eq!(anchor.at(5.0), (0.0, 9.8));
+    }
+
+    #[test]
+    fn a_damage_row_index_is_its_place_in_its_table_and_a_slice_names_its_entity() {
+        let data = AiData {
+            names: [
+                "FTUEDamageTableMiner",
+                "Drowned_Miner_Bomb",
+                "Drowned_Miner_Bomb_Explosion",
+            ]
+            .map(str::to_owned)
+            .to_vec(),
+            damage_table_rows: vec![DamageTableRows {
+                table: 0,
+                rows: vec![1, 2],
+            }],
+            projectile_entities: vec![ProjectileEntity {
+                slice: 1,
+                asset: [9; 16],
+                projectile_component: 2,
+                stuck_lifetime_s: 0.7,
+                ownership_component: Some(1),
+                impact: None,
+            }],
+            ranged_attack_streams: vec![RangedAttackStream {
+                profile: 0,
+                attack: 1,
+                index: 198,
+                arc: Some(GRENADIER_ARC),
+            }],
+            ..AiData::default()
+        };
+        assert_eq!(
+            data.damage_row_index("ftuedamagetableminer", "Drowned_Miner_Bomb"),
+            Some(0)
+        );
+        assert_eq!(
+            data.damage_row_index("FTUEDamageTableMiner", "drowned_miner_bomb_explosion"),
+            Some(1)
+        );
+        assert_eq!(data.damage_row_index("FTUEDamageTableMiner", "Other"), None);
+        assert_eq!(
+            data.projectile_entity("Drowned_Miner_Bomb")
+                .map(|entity| entity.asset),
+            Some([9; 16])
+        );
+        assert!(data.projectile_entity("Other").is_none());
+        assert_eq!(
+            data.ranged_attack_stream("FTUEDamageTableMiner", "Drowned_Miner_Bomb")
+                .map(|stream| stream.index),
+            Some(198)
+        );
     }
 }

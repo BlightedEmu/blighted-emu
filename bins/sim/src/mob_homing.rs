@@ -13,6 +13,7 @@
 //! exponential turn per 1/30 s, the smoothstep move in `MoveToDuration`, `MaxMoveDistance` 0 is no
 //! limit) are Inferred from the parameter names and their values in the data.
 
+use nw_content::player_attacks::AttackMotion;
 use nw_sim_core::{Position, yaw_gap, yaw_toward};
 
 /// The clip type of a homing clip.
@@ -361,6 +362,52 @@ fn move_step(
     Some(step)
 }
 
+/// The root motion of the fragment entry a mob's CAGE action plays
+/// ([`nw_ai::data::FragmentVariant::root_motion`], times the action's `MotionMultiplier`): the
+/// server moves the mob by its animation, as retail does.
+///
+/// Observed: retail mobs moved in the fragments whose action has a motion multiplier, and the
+/// sim's moved 0 m (all-capture traces 2026-11-26, 13 ledgers: `Dodge_B` p50 1.57 m backward
+/// over 10 starts, `Dodge_R` 2.12 m over 5, `Attack_Lunge` 2.42 m over 19,
+/// `Officer_AnchorDash` 2.81 m over 3; the waypoint `POI_*` fragments, whose action has none,
+/// 0.00 m). Inferred: each step's offset is turned by the mob's facing at that step (the homing
+/// clips turn the mob while it plays).
+#[derive(Debug, Clone, PartialEq)]
+pub struct RootRun {
+    motion: AttackMotion,
+    multiplier: f32,
+    started_ms: u64,
+    /// The offset of the motion so far (right, forward, m, with the multiplier).
+    applied: [f32; 2],
+}
+
+impl RootRun {
+    /// The root motion `motion` of an entry whose action's multiplier is `multiplier`, started at
+    /// `started_ms`.
+    pub fn new(motion: AttackMotion, multiplier: f32, started_ms: u64) -> Self {
+        Self {
+            motion,
+            multiplier,
+            started_ms,
+            applied: [0.0; 2],
+        }
+    }
+
+    /// The ground step (east, north, m) of the motion from its last step to `now_ms` for a body
+    /// facing `yaw` (forward is `(-sin, cos)`, right `(cos, sin)`); the step is taken.
+    pub fn step(&mut self, now_ms: u64, yaw: f32) -> [f32; 2] {
+        // A fragment of a few seconds.
+        #[allow(clippy::cast_precision_loss, reason = "a fragment of a few seconds")]
+        let since_ms = now_ms.saturating_sub(self.started_ms) as f32;
+        let at = self.motion.offset_at(since_ms);
+        let offset = [at[0] * self.multiplier, at[1] * self.multiplier];
+        let [right, forward] = [offset[0] - self.applied[0], offset[1] - self.applied[1]];
+        self.applied = offset;
+        let (sin, cos) = yaw.sin_cos();
+        [right * cos - forward * sin, right * sin + forward * cos]
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -516,5 +563,32 @@ mod tests {
         step(&mut runs, 1_200, &mut body, Some(at(0.0, 4.0)), false, free);
         step(&mut runs, 1_700, &mut body, Some(at(0.0, 4.0)), false, free);
         assert!((body.position.y - 1.0).abs() < 1e-3, "2 m/s for 0.5 s");
+    }
+
+    #[test]
+    fn a_root_step_is_its_offset_since_the_last_step_turned_by_the_facing_and_scaled() {
+        const STEP_MS: f32 = 100.0;
+        const MULTIPLIER: f32 = 2.0;
+        // 1 m forward and 0.5 m right in two steps of 100 ms.
+        let motion = AttackMotion {
+            step_ms: STEP_MS,
+            offsets: vec![[0.0, 0.0], [0.25, 0.5], [0.5, 1.0]],
+            inherit_velocity: false,
+            inherit_max_mps: None,
+            decel_mps2: [0.0; 2],
+        };
+        let mut run = RootRun::new(motion, MULTIPLIER, 1_000);
+        let north = run.step(1_100, 0.0);
+        assert!(
+            (north[0] - 0.5).abs() < 1e-5 && (north[1] - 1.0).abs() < 1e-5,
+            "{north:?}"
+        );
+        // Facing west: forward is west (-x), right is north (+y).
+        let west = run.step(1_200, std::f32::consts::FRAC_PI_2);
+        assert!(
+            (west[0] + 1.0).abs() < 1e-5 && (west[1] - 0.5).abs() < 1e-5,
+            "{west:?}"
+        );
+        assert_eq!(run.step(1_500, 0.0), [0.0, 0.0], "after its end");
     }
 }

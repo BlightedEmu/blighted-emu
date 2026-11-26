@@ -1380,6 +1380,9 @@ pub struct SimWorld {
     /// Mob swings that have not hit yet: the time they hit, the server time they started, and
     /// the swing.
     swings: Vec<PendingMobSwing>,
+    /// Mob swings whose damage window is open and that did not reach their target yet
+    /// ([`SimWorld::mob_hits`]).
+    open_swings: Vec<attack::OpenMobSwing>,
     /// Player swings that have not hit yet.
     player_swings: Vec<PlayerSwing>,
     /// The projectiles of ranged and magic attacks on their way to their mob.
@@ -1607,6 +1610,7 @@ impl SimWorld {
             after_bundles: Vec::new(),
             drinks: Vec::new(),
             swings: Vec::new(),
+            open_swings: Vec::new(),
             player_swings: Vec::new(),
             projectile_flights: Vec::new(),
             effect_flights: Vec::new(),

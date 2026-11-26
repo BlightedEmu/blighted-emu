@@ -61,12 +61,14 @@ use nw_content::layout::ContentLayout;
 use nw_content::mob_prefabs::ASSET_ID_LEN;
 use nw_content::status_effects::Control;
 use nw_sim_core::character::STEP_UP_M;
+use nw_sim_core::steering::StrafeFacing;
+use nw_sim_core::walk_map::OffMap;
 use nw_sim_core::{Ground, Mover, Position, Seen, Steering, Threat, yaw_gap, yaw_toward};
 use nw_world::WorldFile;
 use nw_world::records::{AiBehaviour, AiProfile, PathMode, PatrolPath};
 use serde::Deserialize;
 
-use crate::mob_homing::{self, Body, HOMING_CLIP, HomingClip, HomingRun, PARAM_TRUE};
+use crate::mob_homing::{self, Body, HOMING_CLIP, HomingClip, HomingRun, PARAM_TRUE, RootRun};
 use crate::mob_path::{GOAL_REACH_M, PathAnswer, PathPlan, PathPool, find_path};
 use crate::mobs::MobReach;
 
@@ -91,6 +93,15 @@ const CLOSE_TARGET_M: f32 = IMMEDIATE_VICINITY_M;
 /// Longest time one AI step may move a mob, so a stalled tick never makes it jump (our
 /// engineering limit).
 const MAX_STEP_MS: u64 = 1_000;
+/// A smaller step of a root motion is no move (our engineering limit).
+const ROOT_STEP_EPSILON_M: f32 = 1e-4;
+/// A mob's root motion takes it no nearer its target than this. Observed: over 699 retail attack
+/// starts within 3 m of the own player (13 ledgers, 2026-11-26), the least distance between the
+/// mob and the player in the attack was p1 0.67, p5 0.79, p10 0.82 and p50 1.01 m (the sailors'
+/// collider radius is 0.41 m, the player's 0.41 m); the undead officer's
+/// `Attack_Close_2H_Axe_04`, whose root goes 2.19 m forward, moved 0.05 to 0.73 m in 9 starts
+/// 1.05 to 1.94 m from the player. Inferred: the bodies stop the root; the value is p5.
+const ROOT_TARGET_STOP_M: f32 = 0.79;
 /// The step of a floor check along a line (our engineering limit: half a body).
 const FLOOR_STEP_M: f32 = 0.5;
 /// A body this near the floor under it stands on that floor (our engineering limit: a floor
@@ -117,6 +128,12 @@ const REACH_RECHECK_M: f32 = FLOOR_STEP_M;
 const PATH_RECHECK_M: f32 = 3.0;
 /// The least time between two way searches of one mob, ms (our engineering limit).
 const PATH_RETRY_MS: u64 = 1_000;
+/// A mob with a goal that stays within [`STALL_REACH_M`] of one place this long has stalled, ms
+/// (our engineering limit: twice the way search's retry time).
+const STALL_MS: u64 = 2_000;
+/// How far a moving mob gets in [`STALL_MS`] at the least, m (our engineering limit: a floor
+/// step; the slowest walk of the slices, 1 m/s, covers four in that time).
+const STALL_REACH_M: f32 = FLOOR_STEP_M;
 /// How long an ask of a way search off the tick lives ([`PathPool`]): its mob asks again after
 /// [`PATH_RETRY_MS`].
 pub const PATH_ASK_LIFE: std::time::Duration = std::time::Duration::from_millis(PATH_RETRY_MS);
@@ -1049,7 +1066,9 @@ fn steer_along(
             }
             false
         }
-        None if plan.complete => {
+        // A way off the walk map ends where the mob is back on the map: it goes on from there
+        // over the map (`mob_path::find_path`).
+        None if plan.complete || plan.off_map => {
             *path = None;
             mover.steer_to(goal, steering, dt_s)
         }
@@ -1112,11 +1131,12 @@ enum MotionKind {
         repath_m: f32,
         around: Option<Around>,
     },
-    /// Around the target until `until_ms`.
+    /// Around the target until `until_ms`, turning to face it by `facing`.
     Strafe {
         ideal_m: (f32, f32),
         left: bool,
         until_ms: u64,
+        facing: StrafeFacing,
     },
     /// Away from its target, else from where it was last hit, until that point lies beyond the
     /// distance of its ambient vision: a `Flee` navigation without a picked point (Observed:
@@ -1186,6 +1206,8 @@ enum WindowAct {
         row: NameId,
         reach: MobReach,
         ranged: Option<RangedWindow>,
+        /// How long the clip stays open after its start, ms (0: a clip with no end).
+        open_ms: u64,
     },
     /// It casts its spell.
     Cast(CastWindow),
@@ -1256,6 +1278,9 @@ pub struct Strike {
     pub reach: MobReach,
     /// The projectile of a ranged clip; `None` for a damage window.
     pub ranged: Option<RangedClip>,
+    /// Until when (sim ms) its damage window is open: a swing that does not reach its target
+    /// yet is judged again until then (`SimWorld::mob_hits`). `None`: it is judged once.
+    pub open_until_ms: Option<u64>,
 }
 
 /// A hit of a damage window on the mob's target.
@@ -1417,6 +1442,8 @@ struct MindState {
     windows: Vec<Window>,
     /// The `Homing` clips of the attack it plays.
     homing: Vec<HomingRun>,
+    /// The root motion of the CAGE action it plays, when the action's animation moves it.
+    root: Option<RootRun>,
     /// The way it walks around solids to its motion's goal ([`crate::mob_path`]).
     path: Option<PathPlan>,
     /// When it may search for a way again.
@@ -1434,6 +1461,11 @@ struct MindState {
     reachable_ms: Option<u64>,
     /// Its home and its route's points are fitted to the walk map ([`Self::fit_to_map`]).
     fitted: bool,
+    /// On its way home the walk map gave it no way: it searches and walks without the map
+    /// ([`OffMap`]) until its reset ends ([`Self::way_found`]).
+    off_map: bool,
+    /// Where and since when its motion to a goal makes no way ([`Self::stalled`]).
+    stall: Option<(Position, u64)>,
     reach: Option<ReachCheck>,
     statuses: Vec<NameId>,
     /// While a hit reaction plays: until when.
@@ -1676,6 +1708,53 @@ impl MindState {
     fn stop_moving(&mut self) {
         self.motion = None;
         self.speed_mps = 0.0;
+        self.stall = None;
+    }
+
+    /// Whether its motion to `goal` has failed because it makes no way: a mob that stays within
+    /// [`STALL_REACH_M`] of one place for [`STALL_MS`] searches a new way from where it stands,
+    /// and a move to a place (`to_a_place`: a waypoint, its home) that stands at the end of a
+    /// way that does not reach it has failed, so that its tree picks again. Without it a move
+    /// whose every step found a free side step never searched a way and went on against the
+    /// solid, and a patrol mob at the end of a partial way stood for good (live 2026-11-26
+    /// 01:49:18 to 01:54:40: a patrol mob of a beach camp in `PatrolMove` for 322 s with no
+    /// waypoint reached and no failed move, seen walking in place against a tree).
+    fn stalled(
+        &mut self,
+        ai: &MobAi,
+        around: &Surroundings<'_>,
+        at: Position,
+        goal: Option<Position>,
+        to_a_place: bool,
+    ) -> bool {
+        let Some(goal) = goal else {
+            self.stall = None;
+            return false;
+        };
+        let now_ms = around.now_ms;
+        match self.stall {
+            Some((from, since_ms)) if from.horizontal_distance(at) < STALL_REACH_M => {
+                if now_ms.saturating_sub(since_ms) < STALL_MS {
+                    return false;
+                }
+            }
+            _ => {
+                self.stall = Some((at, now_ms));
+                return false;
+            }
+        }
+        self.stall = Some((at, now_ms));
+        tracing::debug!(x = at.x, y = at.y, z = at.z, "mob move stalled");
+        let at_way_end = self
+            .path
+            .take()
+            .is_some_and(|plan| !plan.complete && plan.walked());
+        if to_a_place && at_way_end {
+            return true;
+        }
+        self.next_path_ms = 0;
+        self.plan_way(ai, around, at, goal);
+        false
     }
 
     /// A way search from `from` to `to` for `purpose`: in this step without a pool of
@@ -1691,10 +1770,10 @@ impl MindState {
     ) -> Option<Option<PathPlan>> {
         self.next_path_ms = around.now_ms + PATH_RETRY_MS;
         let Some(paths) = around.paths else {
-            return Some(find_path(around.ground, from, to, max_slope));
+            return Some(find_path(around.ground, from, to, max_slope, self.off_map));
         };
         self.pending_path = Some(PendingPath {
-            id: paths.ask(around.entity, from, to, max_slope),
+            id: paths.ask(around.entity, from, to, max_slope, self.off_map),
             purpose,
             from,
             to,
@@ -1757,13 +1836,19 @@ impl MindState {
         }
     }
 
-    /// Takes the way a search found to `goal`, or for a mob on its way home with no way found,
-    /// its trail of the way out walked back. Whether it has a way.
+    /// Takes the way a search found to `goal`. A mob on its way home with no way found over the
+    /// walk map goes off the map: its next search and its moves are without the map until its
+    /// reset ends (the map never holds a mob away from its home). With no way found without the
+    /// map either, it walks its trail of the way out back. Whether it has a way, or searches on.
     fn way_found(&mut self, ai: &MobAi, goal: Position, plan: Option<PathPlan>) -> bool {
-        let plan = if plan.as_ref().is_some_and(|plan| plan.complete)
-            || !self.resetting(ai)
-            || self.trail.is_empty()
-        {
+        let complete = plan.as_ref().is_some_and(|plan| plan.complete);
+        if !complete && !self.off_map && self.resetting(ai) {
+            self.off_map = true;
+            self.next_path_ms = 0;
+            self.path = None;
+            return true;
+        }
+        let plan = if complete || !self.resetting(ai) || self.trail.is_empty() {
             plan
         } else {
             let mut points: Vec<Position> = self.trail.iter().rev().copied().collect();
@@ -1773,6 +1858,7 @@ impl MindState {
                 points,
                 next: 0,
                 complete: true,
+                off_map: self.off_map,
             })
         };
         self.path = plan;
@@ -1801,15 +1887,26 @@ impl MindState {
         }
     }
 
-    /// The attack it plays ends: its damage windows and its homing clips with it.
+    /// The attack it plays ends: its damage windows, its homing clips and its root motion with
+    /// it.
     fn end_attack(&mut self) {
         self.windows.clear();
         self.homing.clear();
+        self.root = None;
     }
 
-    /// One step at `now_ms` of the homing clips of its attack, for a mob at `at` whose target
-    /// stands at `target`; a `rooted` mob only turns. A mob that its tree moves is not homed
-    /// (the move steers it).
+    /// One step at `now_ms` of the homing clips and the root motion of the action it plays, for
+    /// a mob at `at` whose target stands at `target`; a `rooted` mob only turns. A mob that its
+    /// tree moves is neither homed nor moved by its root (the move steers it).
+    ///
+    /// The root moves the mob in the steps that no homing clip moves it, by the same floor rule
+    /// (`floor_line` on its ground: no solid, no ledge, no place the walk map closes); a step the
+    /// floor stops ends the root motion, and a step that would take it nearer its target than
+    /// [`ROOT_TARGET_STOP_M`] is not taken. Inferred from the retail knife attacks of the chaplain
+    /// (`Playthrough_Part_01`, `Attack_Close_1H_Knife_01`): in 3 of its 5 starts the body went
+    /// 1.06 to 2.08 m in its homing clip's move (from 0.15 s, over 0.33 to 0.5 s), then drifted
+    /// 0.5 to 0.8 m more at the slow pace of its root up to 0.8 to 1.3 s; a homing move that also
+    /// took the root's step would overshoot the clip's `MoveToDistance`.
     fn home_in(
         &mut self,
         ai: &MobAi,
@@ -1819,24 +1916,41 @@ impl MindState {
         now_ms: u64,
         rooted: bool,
     ) {
-        if self.homing.is_empty() || self.motion.is_some() {
+        if self.motion.is_some() {
+            // The steps that the move takes pass by the root.
+            if let Some(run) = self.root.as_mut() {
+                run.step(now_ms, self.yaw);
+            }
             return;
         }
         let max_slope = ai.arch(self.archetype).and_then(|arch| arch.max_slope_deg);
+        let floor = |from: Position, to: Position| {
+            floor_line(ground, from, to, max_slope).map(|end| stand_after_move(ground, end))
+        };
         let mut body = Body {
             position: *at,
             yaw: self.yaw,
         };
-        mob_homing::step(
-            &mut self.homing,
-            now_ms,
-            &mut body,
-            target,
-            rooted,
-            |from, to| {
-                floor_line(ground, from, to, max_slope).map(|end| stand_after_move(ground, end))
-            },
-        );
+        mob_homing::step(&mut self.homing, now_ms, &mut body, target, rooted, &floor);
+        let homed = body.position != *at;
+        if let Some(run) = self.root.as_mut() {
+            let [east, north] = run.step(now_ms, body.yaw);
+            let goal = Position {
+                x: body.position.x + east,
+                y: body.position.y + north,
+                z: body.position.z,
+            };
+            let into_target = target.is_some_and(|target| {
+                let after = goal.horizontal_distance(target);
+                after < ROOT_TARGET_STOP_M && after < body.position.horizontal_distance(target)
+            });
+            if !rooted && !homed && !into_target && east.hypot(north) > ROOT_STEP_EPSILON_M {
+                match floor(body.position, goal) {
+                    Some(end) => body.position = end,
+                    None => self.root = None,
+                }
+            }
+        }
         if body
             != (Body {
                 position: *at,
@@ -2155,7 +2269,12 @@ impl MindState {
                     speed_mps: cast.speed_mps,
                     table: table.clone(),
                 }),
-                WindowAct::Strike { row, reach, ranged } => {
+                WindowAct::Strike {
+                    row,
+                    reach,
+                    ranged,
+                    open_ms,
+                } => {
                     let (Some((target, target_at)), Some(table)) = (target, &table) else {
                         tracing::debug!(
                             mob = entity,
@@ -2184,6 +2303,7 @@ impl MindState {
                                 lead_max_rad: ranged.lead_max_rad,
                                 speed_mps: ranged.speed_mps,
                             }),
+                            open_until_ms: (open_ms > 0).then(|| now_ms.saturating_add(open_ms)),
                         },
                     });
                 }
@@ -2191,8 +2311,9 @@ impl MindState {
         }
     }
 
-    /// The task `task` of `slot` starts playing.
+    /// The task `task` of `slot` starts playing: the root motion of the action before it ends.
     fn show(&mut self, ai: &MobAi, slot: Slot, task: NameId, now_ms: u64) {
+        self.root = None;
         let data = ai.data();
         let Some(action) = ai
             .arch(self.archetype)
@@ -2239,6 +2360,14 @@ impl MindState {
             self.turn = done_at_ms.map(|end| (now_ms, end, self.yaw));
         }
         self.open_windows(ai, tags, cage, now_ms, done_at_ms, false);
+        // The body entry it plays, as its windows ([`Self::open_windows`]).
+        self.root = cage.motion_multiplier.and_then(|multiplier| {
+            let motion = cage
+                .variant(&|tag| tags.contains(&tag))?
+                .root_motion
+                .clone()?;
+            Some(RootRun::new(motion, multiplier, now_ms))
+        });
     }
 
     /// The damage windows, ranged clips and homing clips of `cage`, which starts at `now_ms`
@@ -2313,6 +2442,15 @@ impl MindState {
                 reason = "seconds of a fragment"
             )]
             let starts_ms = now_ms + (window.start_s * MS_PER_S).round() as u64;
+            // The clip's length: the swing may still reach its target while it is open.
+            #[allow(
+                clippy::cast_possible_truncation,
+                clippy::cast_sign_loss,
+                reason = "seconds of a fragment"
+            )]
+            let open_ms = window.end_s.map_or(0, |end_s| {
+                ((end_s - window.start_s).max(0.0) * MS_PER_S).round() as u64
+            });
             let at_ms = if moving && window.end_s.is_none() {
                 ON_CONTACT_MS
             } else {
@@ -2324,6 +2462,7 @@ impl MindState {
                     row,
                     reach: window_reach(ai, shaped(ai, window, weapon), homing),
                     ranged: None,
+                    open_ms,
                 },
             });
         }
@@ -2367,6 +2506,7 @@ impl MindState {
                             .and_then(|speed| speed.parse::<f32>().ok())
                             .filter(|speed| *speed > 0.0),
                     }),
+                    open_ms: 0,
                 },
             });
         }
@@ -2414,7 +2554,11 @@ impl MindState {
         dt_s: f32,
     ) {
         let now_ms = around.now_ms;
-        let ground = around.ground;
+        self.off_map &= self.resetting(ai);
+        // A way found without the walk map is walked without it.
+        let off_map = self.off_map || self.path.as_ref().is_some_and(|plan| plan.off_map);
+        let plain = OffMap(around.ground);
+        let ground: &dyn Ground = if off_map { &plain } else { around.ground };
         if let Some((start_ms, end_ms, from_yaw)) = self.turn {
             let facing = self
                 .shown
@@ -2480,11 +2624,18 @@ impl MindState {
                 ideal_m,
                 left,
                 until_ms,
+                facing,
             } => match target {
                 None => Some(MotionOutcome::Failed),
                 Some(_) if now_ms >= *until_ms => Some(MotionOutcome::Arrived),
                 Some(target) => {
-                    mover.strafe_around(target.position, *ideal_m, *left, &motion.steering, dt_s);
+                    mover.strafe_around(
+                        target.position,
+                        *ideal_m,
+                        *left,
+                        (&motion.steering, *facing),
+                        dt_s,
+                    );
                     None
                 }
             },
@@ -2539,6 +2690,11 @@ impl MindState {
                 Some(MotionOutcome::Failed)
             }
         };
+        let to_a_place = matches!(motion.kind, MotionKind::To(_));
+        let outcome = outcome.or_else(|| {
+            self.stalled(ai, around, *at, goal, to_a_place)
+                .then_some(MotionOutcome::Failed)
+        });
         self.yaw = mover.yaw;
         self.turned = true;
         self.speed_mps = mover.speed_mps;
@@ -2636,6 +2792,7 @@ impl TreeMind {
                 turn: None,
                 windows: Vec::new(),
                 homing: Vec::new(),
+                root: None,
                 path: None,
                 next_path_ms: 0,
                 pending_path: None,
@@ -2648,6 +2805,8 @@ impl TreeMind {
                 last_damage: None,
                 reachable_ms: None,
                 fitted: false,
+                off_map: false,
+                stall: None,
                 reach: None,
                 // The slice's `m_initialStatusEffects` (`AI_Enable_Stagger`); the cards do
                 // not show them (Observed: no such effect on the heavies' and Seraphim's cards).
@@ -3607,8 +3766,10 @@ impl TreeMind {
         };
         let (motion, turn_rate) = match &ai.data().node(node).kind {
             NodeKind::Navigation(nav) => (&nav.motion, &nav.turn_rate),
-            // Inferred: a strafe's facing follows its target at this rate.
-            NodeKind::Strafe(strafe) => (&strafe.motion, &strafe.facing_convergence_rate),
+            // Inferred: `DirectionChangeRateDegs` (360 on every strafe node) is the turn rate of a
+            // strafe without a config; its facing converges by `FacingConvergenceRate`, a time
+            // in seconds ([`StrafeFacing`]).
+            NodeKind::Strafe(strafe) => (&strafe.motion, &strafe.direction_change_rate),
             _ => return STANDING,
         };
         Steering {
@@ -3761,7 +3922,7 @@ impl TreeMind {
                     self.log_decision(ai, others.entity, at, node, task);
                     let config = config
                         .and_then(|index| ai.arch(self.state.archetype)?.nav_configs.get(index));
-                    let (steering, ideal, lateral) = {
+                    let (steering, ideal, lateral, convergence_s) = {
                         let view = self.state.view(ai, at, now_ms, passive);
                         // A field the node leaves unset comes from the slice's strafe config
                         // ([`strafe_config_number`]).
@@ -3779,8 +3940,17 @@ impl TreeMind {
                             ),
                             number(&strafe.lateral_frequency_min, LATERAL_MIN_FIELD)
                                 .zip(number(&strafe.lateral_frequency_max, LATERAL_MAX_FIELD)),
+                            number(&strafe.facing_convergence_rate, FACING_CONVERGENCE_FIELD),
                         )
                     };
+                    // Seconds of the node.
+                    #[allow(clippy::cast_possible_truncation, reason = "seconds of the node")]
+                    let facing = convergence_s.filter(|time_s| *time_s > 0.0).map_or(
+                        StrafeFacing::TurnRate,
+                        |time_s| StrafeFacing::Converge {
+                            time_s: time_s as f32,
+                        },
+                    );
                     // Inferred: one sideways move lasts a random time of its lateral move
                     // frequency (seconds); retail strafes of 31 to 1303 ms were cut earlier by the
                     // next plan (trace finding b).
@@ -3803,6 +3973,7 @@ impl TreeMind {
                             ideal_m,
                             left,
                             until_ms,
+                            facing,
                         },
                         steering,
                     });
@@ -4068,6 +4239,10 @@ const IDEAL_MIN_FIELD: &str = "m_idealDistanceMin";
 const IDEAL_MAX_FIELD: &str = "m_idealDistanceMax";
 const LATERAL_MIN_FIELD: &str = "m_lateralMovementFrequencyMin";
 const LATERAL_MAX_FIELD: &str = "m_lateralMovementFrequencyMax";
+/// The slice config's facing convergence time of a strafe (Observed: 0.25 in the `Strafe` and
+/// `StrafeFar` configs of the first mate, the beach grenadier and the chaplain, as on every
+/// strafe node; [`StrafeFacing`]).
+const FACING_CONVERGENCE_FIELD: &str = "m_facingConvergenceRate";
 
 /// The number of strafe field `field` in the slice navigation config `config` (its
 /// `action_params`, by the lower-case CRC32 of the field name).
@@ -4895,6 +5070,7 @@ pub mod test_support {
                 frag_tags: Vec::new(),
                 length,
                 windows: Vec::new(),
+                root_motion: None,
             }],
             weapon_variants: Vec::new(),
             activation: None,
@@ -4995,6 +5171,7 @@ pub mod test_support {
                 frag_tags: Vec::new(),
                 length,
                 windows: Vec::new(),
+                root_motion: None,
             }],
             weapon_variants: Vec::new(),
             activation: None,
@@ -5284,6 +5461,116 @@ mod tests {
         );
     }
 
+    /// A root motion of [`ROOT_M`] straight forward over 30 frames of 1/30 s.
+    const ROOT_M: f32 = 2.0;
+    const ROOT_FRAMES: u16 = 30;
+    const ROOT_FRAME_MS: f32 = 1_000.0 / 30.0;
+
+    fn forward_root() -> nw_content::player_attacks::AttackMotion {
+        nw_content::player_attacks::AttackMotion {
+            step_ms: ROOT_FRAME_MS,
+            offsets: (0..=ROOT_FRAMES)
+                .map(|frame| [0.0, ROOT_M * f32::from(frame) / f32::from(ROOT_FRAMES)])
+                .collect(),
+            inherit_velocity: false,
+            inherit_max_mps: None,
+            decel_mps2: [0.0; 2],
+        }
+    }
+
+    /// Where a mob at `from` facing `yaw` stands after its action's root motion
+    /// ([`forward_root`] times `multiplier`) played to its end on `ground`, with its target at
+    /// `target`.
+    fn after_root(
+        ground: &dyn Ground,
+        (from, yaw): (Position, f32),
+        multiplier: f32,
+        target: Option<Position>,
+    ) -> Position {
+        const TICK_MS: u64 = 33;
+        const END_MS: u64 = 1_500;
+        let ai = test_ai(&[]);
+        let mut mind = TreeMind::new(&ai, 0, from, yaw, 1, None).expect("a tree");
+        mind.state.root = Some(RootRun::new(forward_root(), multiplier, 0));
+        let mut at = from;
+        for now in (0..=END_MS).step_by(TICK_MS as usize) {
+            mind.state.home_in(&ai, &mut at, target, ground, now, false);
+        }
+        at
+    }
+
+    #[test]
+    fn a_root_motion_moves_the_mob_where_it_faces_times_its_multiplier() {
+        const MULTIPLIER: f32 = 1.5;
+        let west = after_root(
+            &FlatGround(GROUND_Z),
+            (START, std::f32::consts::FRAC_PI_2),
+            MULTIPLIER,
+            None,
+        );
+        assert!(
+            (START.x - west.x - ROOT_M * MULTIPLIER).abs() < 1e-3,
+            "{west:?}"
+        );
+        assert!((west.y - START.y).abs() < 1e-3, "{west:?}");
+        let north = after_root(&FlatGround(GROUND_Z), (START, 0.0), 1.0, None);
+        assert!((north.y - START.y - ROOT_M).abs() < 1e-3, "{north:?}");
+    }
+
+    #[test]
+    fn a_root_motion_stops_short_of_its_target() {
+        // The target stands 1.5 m ahead: the 2 m root stops at the bodies' distance.
+        let target = Position {
+            y: START.y + 1.5,
+            ..START
+        };
+        let stopped = after_root(&FlatGround(GROUND_Z), (START, 0.0), 1.0, Some(target));
+        let left = stopped.horizontal_distance(target);
+        assert!(
+            (ROOT_TARGET_STOP_M - 0.1..=ROOT_TARGET_STOP_M + 0.1).contains(&left),
+            "{left}"
+        );
+    }
+
+    #[test]
+    fn a_root_motion_stops_at_a_wall_a_ledge_and_a_closed_map_cell() {
+        /// Flat ground whose walk map closes every place east of [`CLOSED_FROM_M`].
+        struct ClosedEast;
+        const CLOSED_FROM_M: f32 = 1.0;
+        impl Ground for ClosedEast {
+            fn height_at(&self, _: f32, _: f32) -> Option<f32> {
+                Some(GROUND_Z)
+            }
+
+            fn no_stand(&self, feet: Position) -> bool {
+                self.closed_by_walk_map(feet)
+            }
+
+            fn closed_by_walk_map(&self, feet: Position) -> bool {
+                feet.x - START.x > CLOSED_FROM_M
+            }
+        }
+        const EAST: f32 = -std::f32::consts::FRAC_PI_2;
+        const LONG: f32 = 3.0;
+        let walled = after_root(&Wall, (START, EAST), LONG, None);
+        assert!(walled.x - START.x < 2.0, "short of the wall: {walled:?}");
+        let on_deck = Position {
+            z: GROUND_Z + DECK_HEIGHT_M,
+            ..START
+        };
+        let decked = after_root(&Deck, (on_deck, EAST), LONG, None);
+        assert!(decked.x - START.x <= DECK_END_M, "on the deck: {decked:?}");
+        assert!(
+            (decked.z - on_deck.z).abs() < 1e-3,
+            "not dropped off it: {decked:?}"
+        );
+        let mapped = after_root(&ClosedEast, (START, EAST), LONG, None);
+        assert!(
+            mapped.x - START.x <= CLOSED_FROM_M,
+            "on the map: {mapped:?}"
+        );
+    }
+
     /// Flat ground with a rock from 2 m to 3 m east of [`START`], [`ROCK_HALF_WIDTH_M`] to each
     /// side of the line.
     struct Rock;
@@ -5428,6 +5715,75 @@ mod tests {
     }
 
     #[test]
+    fn a_stalled_move_searches_again_and_a_move_to_a_place_at_a_partial_way_s_end_fails() {
+        let ai = test_ai(&[]);
+        let goal = east(14.0);
+        let around = |now_ms| Surroundings {
+            now_ms,
+            seen: &[],
+            ground: &TwoWalls,
+            health_share: 1.0,
+            entity: 1,
+            tagged: &[],
+            held: None,
+            paths: None,
+        };
+        let partial = PathPlan {
+            goal,
+            points: Vec::new(),
+            next: 0,
+            complete: false,
+            off_map: false,
+        };
+        // A move to a place at the end of a way that does not reach it: it fails.
+        let mut mind = TreeMind::new(&ai, 0, START, 0.0, 1, None).expect("a tree");
+        mind.state.path = Some(partial.clone());
+        assert!(!mind.state.stalled(&ai, &around(0), START, Some(goal), true));
+        assert!(
+            !mind
+                .state
+                .stalled(&ai, &around(STALL_MS - 1), START, Some(goal), true),
+            "not yet"
+        );
+        assert!(
+            mind.state
+                .stalled(&ai, &around(STALL_MS), START, Some(goal), true)
+        );
+        assert_eq!(mind.state.path, None);
+        // A chase in the same place searches a new way and goes on.
+        let mut chase = TreeMind::new(&ai, 0, START, 0.0, 1, None).expect("a tree");
+        chase.state.path = Some(partial);
+        assert!(
+            !chase
+                .state
+                .stalled(&ai, &around(0), START, Some(goal), false)
+        );
+        assert!(
+            !chase
+                .state
+                .stalled(&ai, &around(STALL_MS), START, Some(goal), false)
+        );
+        assert!(
+            chase.state.path.is_some_and(|plan| plan.complete),
+            "a new way around the walls"
+        );
+        // A mob that moves on has not stalled.
+        let mut moving = TreeMind::new(&ai, 0, START, 0.0, 1, None).expect("a tree");
+        assert!(
+            !moving
+                .state
+                .stalled(&ai, &around(0), START, Some(goal), true)
+        );
+        let on = east(STALL_REACH_M);
+        assert!(
+            !moving
+                .state
+                .stalled(&ai, &around(STALL_MS), on, Some(goal), true)
+        );
+        assert_eq!(moving.state.stall, Some((on, STALL_MS)));
+    }
+
+    #[test]
     fn an_answer_to_an_ask_the_mob_gave_up_is_dropped() {
         const ASK: u64 = 4;
         let ai = test_ai(&[]);
@@ -5439,7 +5795,7 @@ mod tests {
             to: east(14.0),
         };
         mind.state.pending_path = Some(pending);
-        let plan = find_path(&TwoWalls, START, east(14.0), None);
+        let plan = find_path(&TwoWalls, START, east(14.0), None, false);
         assert!(plan.is_some(), "a way");
         mind.path_answered(
             &ai,
@@ -6412,6 +6768,7 @@ mod tests {
                 frag_tags: Vec::new(),
                 length: FragmentLength::Seconds(seconds),
                 windows: Vec::new(),
+                root_motion: None,
             }]
         };
         let side = |min_deg, max_deg| CageCondition::DamagedByAngle { min_deg, max_deg };

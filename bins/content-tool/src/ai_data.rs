@@ -23,16 +23,20 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::Path;
 
 use nw_ai::data::{
-    AiData, Archetype, BlockActivity, BlockEffect, CageAction, CageCondition, Completion, Creature,
-    EntityTrigger, FacingLength, FacingMode, FragmentCase, FragmentLength, FragmentVariant, Grid,
-    NavConfig, ProcWindow, ProjectileSlice, RangedAttack, SliceTriggerRef, TagActivity, TagEffect,
-    TreeRef, Vision,
+    AiData, ArcTrajectory, Archetype, BlockActivity, BlockEffect, CageAction, CageCondition,
+    Completion, Creature, DamageTableRows, DelayedEvent, EntityTrigger, FacingLength, FacingMode,
+    FragmentCase, FragmentLength, FragmentVariant, Grid, NavConfig, ProcWindow, ProjectileEntity,
+    ProjectileImpact, ProjectileSlice, RangedAttack, RangedAttackStream, SliceTriggerRef,
+    TagActivity, TagEffect, TreeRef, Vision,
 };
 use nw_ai::decode::{DecodeError, ServerPakError, TreeDecoder, decode_entries, server_pak_entries};
 use nw_ai::node::NodeId;
 use nw_ai::value::{NameId, Param, Value};
 use nw_content::creature_animations::CreatureRow;
+use nw_content::player_attacks::AttackMotion;
+use nw_formats::asset_catalog::{ASSET_CATALOG_ENTRY, slice_assets_in};
 use nw_formats::azcs::{decode_azcs, is_azcs};
+use nw_formats::caf::Caf;
 use nw_formats::datasheet::Datasheet;
 use nw_formats::mannequin::{
     ActionList, AnimDatabase, BlockActivity as NwBlockActivity, BlockChange, CageGrid, Condition,
@@ -41,12 +45,22 @@ use nw_formats::mannequin::{
 };
 use nw_formats::objectstream::{Element, lowercase_crc32, parse_object_stream};
 use nw_formats::pak::{PakArchive, PakError, find_paks};
+use nw_formats::skeleton::Skeleton;
 use nw_oodle::KrakenDecompressor;
+use nw_world::level_script::{
+    AssetRef, DELAYED_EVENT_TYPE, NETWORK_POSITION_TYPE, asset as level_asset,
+};
 use nw_world::slice_triggers::slice_triggers;
+use nw_world::stations::OWNERSHIP;
 
 use crate::creature_animations::{read_databases, read_entries, text_of, weapon_item};
 use crate::error::ToolError;
-use crate::player_attacks::{RANGED_ATTACK_DATABASE, RANGED_CLIP, ranged_attacks, slice_flight};
+use crate::level_doors::replica_index;
+use crate::melee_shapes::root_path_on;
+use crate::player_attacks::{
+    RANGED_ATTACK_DATABASE, RANGED_CLIP, ranged_attack_entries, ranged_attacks, root_motion,
+    slice_flight,
+};
 use crate::source::GameSource;
 use crate::stand_in_trees::{StandInError, stand_in_trees};
 
@@ -56,6 +70,40 @@ pub const DEFAULT_SERVER_PAK: &str = "local-data/server-pak/Server.pak";
 pub const SERVER_PAK_ENV: &str = "NW_SERVER_PAK";
 /// The `CAGE-RangedAttack` parameter that names the projectile slice.
 const SLICE_OVERRIDE_PARAM: &str = "SliceOverride";
+/// The folder of the dynamic slices in the asset catalog.
+const SLICES_FOLDER: &str = "slices/";
+/// The column of a damage table's row ids.
+const DAMAGE_ID_COLUMN: &str = "DamageID";
+/// `{5637158A-9AE1-41A7-A5C0-D07A76116EAF}`: the projectile component (Observed: its
+/// `m_baseSpeed`, `m_accel` and `m_spawnOnHitAsset`; its replica index is the component of the
+/// class 16 member, 2 in `corrupted_miner_bomb.dynamicslice`, 1 in
+/// `corrupted_firstmate_anchor_projectile.dynamicslice`, as newchar-retail-2026-09-18 sent them
+/// at 802.637 s and 1247.540 s).
+const PROJECTILE_COMPONENT_TYPE: [u8; 16] = [
+    0x56, 0x37, 0x15, 0x8a, 0x9a, 0xe1, 0x41, 0xa7, 0xa5, 0xc0, 0xd0, 0x7a, 0x76, 0x11, 0x6e, 0xaf,
+];
+/// The projectile component's slice to spawn where it hits.
+const SPAWN_ON_HIT: &str = "m_spawnOnHitAsset";
+/// The projectile component's stay after a hit.
+const STUCK_LIFETIME: &str = "m_stuckLifetime";
+/// A damage component's hit (Observed in the grenadier bomb's explosion and the anchor's impact:
+/// `m_damageData` > `m_damageDataTable`, `m_damageDataEntry`; the radius of its `m_shape`).
+const DAMAGE_DATA: &str = "m_damageData";
+const DAMAGE_DATA_TABLE: &str = "m_damageDataTable";
+const DAMAGE_DATA_ENTRY: &str = "m_damageDataEntry";
+const DAMAGE_SHAPE: &str = "m_shape";
+const SHAPE_RADIUS: &str = "m_radius";
+/// A delayed event component's delay.
+const DELAY_SECONDS: &str = "m_timeDelaySeconds";
+/// A ranged attack's arc settings (field names from the client's reflection strings).
+const ARC_SETTINGS: &str = "m_arcTrajectorySettings";
+const ARC_ENABLED: &str = "m_useArcTrajectories";
+const ARC_LOB_MIN: &str = "m_lobHeightMin";
+const ARC_LOB_MAX: &str = "m_lobHeightMax";
+const ARC_GRAVITY_MIN: &str = "m_gravityOverrideMin";
+const ARC_GRAVITY_MAX: &str = "m_gravityOverrideMax";
+const ARC_DISTANCE_MIN: &str = "m_distanceLerpMin";
+const ARC_DISTANCE_MAX: &str = "m_distanceLerpMax";
 
 /// Slice fields (Observed names).
 const TREE_ASSETS: &str = "m_behaviorTreeAssets";
@@ -132,6 +180,8 @@ const FACING_MODE: &str = "FacingMode";
 
 /// Animation files by extension.
 const CAF_EXTENSION: &str = ".caf";
+/// Skeleton files.
+const SKELETON_EXTENSION: &str = ".chr";
 const BLEND_SPACE_EXTENSION: &str = ".bspace";
 const COMBINED_BLEND_SPACE_EXTENSION: &str = ".comb";
 const CLIP_EXTENSIONS: [&str; 3] = [
@@ -238,6 +288,8 @@ pub struct AiDataReport {
     pub ranged_attacks: usize,
     /// Projectile slices the ranged clips name, with a flight.
     pub projectile_slices: usize,
+    /// Projectile slices the ranged clips name, with a replicated entity.
+    pub projectile_entities: usize,
     /// Files that could not be used, with the reason.
     pub skipped: BTreeMap<String, String>,
 }
@@ -861,6 +913,99 @@ fn base_name(path: &str) -> String {
         .map_or(file.clone(), str::to_owned)
 }
 
+/// The animation files of the install (lower-case paths) by base name.
+///
+/// # Errors
+///
+/// Returns [`ToolError`] when a pak cannot be listed.
+fn clip_files(game_dir: &Path) -> Result<HashMap<String, Vec<String>>, ToolError> {
+    let mut files: HashMap<String, Vec<String>> = HashMap::new();
+    for pak in find_paks(game_dir).map_err(AiDataError::from)? {
+        let mut archive = PakArchive::open(&pak).map_err(AiDataError::from)?;
+        for entry in archive.entries().map_err(AiDataError::from)? {
+            let path = entry.path.to_lowercase();
+            if CLIP_EXTENSIONS
+                .iter()
+                .any(|extension| path.ends_with(extension))
+            {
+                files.entry(base_name(&path)).or_default().push(path);
+            }
+        }
+    }
+    Ok(files)
+}
+
+/// The clips and skeletons that give the root motion of a CAGE action's entries
+/// ([`FragmentVariant::root_motion`]).
+///
+/// The root motion is the path of the skeleton's root joint, as for the player's attacks
+/// ([`root_path_on`], [`root_motion`]). Observed (build 25810808, the 155 `.chr` files of the
+/// paks that read, probe `mobroots` of the tools repo's capdecode crate): every skeleton's first
+/// joint is its root (`Xform` in 134, `XFORM` in 8, `xform` in 5, an `xform_..._jnt` in 7,
+/// `vinesMulti_rootJoint` in 1), with no parent and a bind pose at the origin, and its controller
+/// id is the CRC-32 of its name as written. So the root track of a clip is the track
+/// of one of these root ids, and any skeleton of that root gives the same root path.
+pub(crate) struct RootClips {
+    /// The clips by base name; a name that two files share is left out.
+    clips: HashMap<String, Caf>,
+    /// One skeleton of each root joint, by the root's controller id.
+    roots: HashMap<u32, Skeleton>,
+}
+
+impl RootClips {
+    /// Reads the `.caf` clips `names` (base names) and every skeleton of the paks.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ToolError`] when the paks cannot be read.
+    fn read(
+        source: &GameSource,
+        game_dir: &Path,
+        names: &BTreeSet<String>,
+    ) -> Result<Self, ToolError> {
+        let files = clip_files(game_dir)?;
+        let wanted: HashSet<String> = names
+            .iter()
+            .filter_map(|name| match files.get(name).map(Vec::as_slice) {
+                Some([path]) if path.ends_with(CAF_EXTENSION) => Some(path.clone()),
+                _ => None,
+            })
+            .collect();
+        let clips = read_entries(source, &wanted)?
+            .into_iter()
+            .filter_map(|(path, bytes)| Some((base_name(&path), Caf::parse(&bytes).ok()?)))
+            .collect();
+        let mut roots = HashMap::new();
+        source.for_each_entry(
+            |path| path.ends_with(SKELETON_EXTENSION),
+            |_, bytes| {
+                if let Ok(skeleton) = Skeleton::parse(&bytes)
+                    && let Some(root) = skeleton.joints.first().map(|joint| joint.controller_id)
+                {
+                    roots.entry(root).or_insert(skeleton);
+                }
+                Ok::<(), ToolError>(())
+            },
+        )?;
+        Ok(Self { clips, roots })
+    }
+
+    /// The root motion of `fragment`, of length `length`: the root path of its main animation
+    /// when it moves; `None` for a fragment that loops or whose length is not one time, whose
+    /// main animation is not a read `.caf` (a blend space), or whose clip has no root track.
+    fn motion(&self, fragment: &Fragment, length: &FragmentLength) -> Option<AttackMotion> {
+        let FragmentLength::Seconds(length_s) = length else {
+            return None;
+        };
+        let clip = fragment.main_animation()?;
+        let caf = self.clips.get(&clip.name.to_lowercase())?;
+        let skeleton = caf.tracks.keys().find_map(|id| self.roots.get(id))?;
+        root_path_on(skeleton, caf, clip, f64::from(*length_s))
+            .ok()
+            .and_then(root_motion)
+    }
+}
+
 /// The example clips of a blend space on `DesiredFacing`: the facing (radians) and the length
 /// (seconds) of each, sorted by facing.
 type FacingClips = Vec<(f64, f64)>;
@@ -892,19 +1037,7 @@ impl ClipLengths {
         game_dir: &Path,
         names: &BTreeSet<String>,
     ) -> Result<Self, ToolError> {
-        let mut files: HashMap<String, Vec<String>> = HashMap::new();
-        for pak in find_paks(game_dir).map_err(AiDataError::from)? {
-            let mut archive = PakArchive::open(&pak).map_err(AiDataError::from)?;
-            for entry in archive.entries().map_err(AiDataError::from)? {
-                let path = entry.path.to_lowercase();
-                if CLIP_EXTENSIONS
-                    .iter()
-                    .any(|extension| path.ends_with(extension))
-                {
-                    files.entry(base_name(&path)).or_default().push(path);
-                }
-            }
-        }
+        let files = clip_files(game_dir)?;
         let mut raw: HashMap<String, Result<Vec<u8>, String>> = HashMap::new();
         let mut pending: BTreeSet<String> = names.clone();
         while !pending.is_empty() {
@@ -1210,13 +1343,40 @@ fn datasheet_path(table: &str) -> String {
     )
 }
 
-/// The unique id of the damage table datasheet of each slice that names one, by the slice's
-/// table path; a datasheet that is missing or does not parse is listed in the report.
-fn damage_table_ids(
+/// A damage table datasheet: its unique id and its rows' `DamageID`s in sheet order.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct DamageSheet {
+    unique_id: String,
+    rows: Vec<String>,
+}
+
+impl DamageSheet {
+    fn of(sheet: Datasheet) -> Self {
+        let id_column = sheet
+            .columns
+            .iter()
+            .position(|column| column.name == DAMAGE_ID_COLUMN);
+        let rows = id_column.map_or_else(Vec::new, |column| {
+            sheet
+                .rows
+                .iter()
+                .filter_map(|row| row.get(column).cloned())
+                .collect()
+        });
+        Self {
+            unique_id: sheet.unique_id,
+            rows,
+        }
+    }
+}
+
+/// The damage table datasheet of each slice that names one, by the slice's table path; a
+/// datasheet that is missing or does not parse is listed in the report.
+fn damage_tables(
     source: &GameSource,
     slices: &BTreeMap<String, SliceAi>,
     report: &mut AiDataReport,
-) -> Result<HashMap<String, String>, ToolError> {
+) -> Result<HashMap<String, DamageSheet>, ToolError> {
     let tables: HashSet<String> = slices
         .values()
         .filter_map(|slice| slice.damage_table.clone())
@@ -1230,7 +1390,7 @@ fn damage_table_ids(
         let sheet = datasheet_path(&table);
         match bytes.get(&sheet).map(|bytes| Datasheet::parse(bytes)) {
             Some(Ok(parsed)) => {
-                ids.insert(table, parsed.unique_id);
+                ids.insert(table, DamageSheet::of(parsed));
             }
             Some(Err(error)) => {
                 report.skipped.insert(sheet, error.to_string());
@@ -1326,7 +1486,7 @@ pub fn build_ai_data(
         }
     }
     drop(slice_bytes);
-    let table_ids = damage_table_ids(source, &slices, &mut report)?;
+    let tables = damage_tables(source, &slices, &mut report)?;
     let grid_paths: HashSet<String> = slices
         .values()
         .filter_map(|slice| slice.grid.clone())
@@ -1405,9 +1565,32 @@ pub fn build_ai_data(
         }
     }
 
+    // The main animations of the entries of the actions that the animation's root moves.
+    let motion_fragments: HashSet<&str> = lists
+        .values()
+        .flat_map(|list| &list.actions)
+        .filter(|action| action.motion_multiplier.is_some())
+        .flat_map(|action| {
+            std::iter::once(action.fragment.as_str()).chain(
+                action
+                    .fragment_cases
+                    .iter()
+                    .map(|case| case.fragment.as_str()),
+            )
+        })
+        .collect();
+    let root_clip_names: BTreeSet<String> = adbs
+        .values()
+        .flat_map(|database| &database.fragments)
+        .filter(|fragment| motion_fragments.contains(fragment.name.as_str()))
+        .filter_map(Fragment::main_animation)
+        .map(|clip| clip.name.to_lowercase())
+        .collect();
+    let roots = RootClips::read(source, game_dir, &root_clip_names)?;
     let mut builder = CageBuilder {
         lists: &lists,
         lengths: &lengths,
+        roots: &roots,
         actions: Vec::new(),
         index: HashMap::new(),
         unknown_fragments: BTreeMap::new(),
@@ -1511,8 +1694,8 @@ pub fn build_ai_data(
             damage_table_id: slice
                 .damage_table
                 .as_ref()
-                .and_then(|table| table_ids.get(table))
-                .map(|id| decoder.intern(id)),
+                .and_then(|table| tables.get(table))
+                .map(|sheet| decoder.intern(&sheet.unique_id)),
             weapon_item: slice.weapon.as_ref().map(|item| decoder.intern(item)),
             default_tags: row_tags
                 .into_iter()
@@ -1541,8 +1724,8 @@ pub fn build_ai_data(
         );
         archetypes.push(archetype);
     }
-    let (ranged_attacks, projectile_slices) =
-        ranged_shots(source, &mut decoder, &builder.actions, &mut report)?;
+    let shots = ranged_shots(source, &mut decoder, &builder.actions, &mut report)?;
+    let damage_table_rows = table_rows(&mut decoder, tables.into_values());
     let trees = decoder.finish();
     let tree_of: HashMap<NameId, u32> = trees
         .trees
@@ -1631,21 +1814,205 @@ pub fn build_ai_data(
         grids,
         cage_actions: builder.actions,
         creatures: creature_list,
-        ranged_attacks,
-        projectile_slices,
+        ranged_attacks: shots.attacks,
+        projectile_slices: shots.flights,
+        ranged_attack_streams: shots.streams,
+        projectile_entities: shots.entities,
+        damage_table_rows,
     };
     Ok((data, report))
 }
 
-/// Every attack of the ranged attack database, and the flight of each projectile slice that a
-/// `CAGE-RangedAttack` clip of `actions` names (`SliceOverride`). A slice that is missing or has
-/// no projectile component goes to the report's skipped files.
+/// What the ranged clips of the creatures fire: every attack of the ranged attack database (its
+/// range and radius, and its stream place and arc), and the flight and replicated entity of each
+/// projectile slice they name.
+struct RangedShots {
+    attacks: Vec<RangedAttack>,
+    streams: Vec<RangedAttackStream>,
+    flights: Vec<ProjectileSlice>,
+    entities: Vec<ProjectileEntity>,
+}
+
+/// The attacks of the ranged attack database `root`, sorted by profile and attack, with the
+/// stream place and arc of each.
+fn database_attacks(
+    decoder: &mut TreeDecoder,
+    root: &Element,
+) -> (Vec<RangedAttack>, Vec<RangedAttackStream>) {
+    let mut attacks: Vec<_> = ranged_attacks(root).into_iter().collect();
+    attacks.sort_by(|left, right| left.0.cmp(&right.0));
+    let ranged = attacks
+        .into_iter()
+        .map(
+            |((profile, attack), (range_m, radius_m, hit_scan))| RangedAttack {
+                profile: decoder.intern(&profile),
+                attack: decoder.intern(&attack),
+                range_m,
+                radius_m,
+                hit_scan,
+            },
+        )
+        .collect();
+    let streams = ranged_attack_entries(root)
+        .into_iter()
+        .map(|entry| RangedAttackStream {
+            profile: decoder.intern(&entry.profile),
+            attack: decoder.intern(&entry.attack),
+            index: entry.index,
+            arc: arc_trajectory(entry.data),
+        })
+        .collect();
+    (ranged, streams)
+}
+
+/// The `m_arcTrajectorySettings` of the ranged attack data `data`, when `m_useArcTrajectories`
+/// is set and every value is there.
+fn arc_trajectory(data: &Element) -> Option<ArcTrajectory> {
+    let settings = child(data, ARC_SETTINGS)?;
+    if !child(settings, ARC_ENABLED)?.as_bool().ok()? {
+        return None;
+    }
+    let float = |name: &str| child(settings, name)?.as_f32().ok();
+    Some(ArcTrajectory {
+        lob_height_m: [float(ARC_LOB_MIN)?, float(ARC_LOB_MAX)?],
+        gravity_mps2: [float(ARC_GRAVITY_MIN)?, float(ARC_GRAVITY_MAX)?],
+        distance_m: [float(ARC_DISTANCE_MIN)?, float(ARC_DISTANCE_MAX)?],
+    })
+}
+
+/// Every element of type `type_id` at or below `root`, depth first.
+fn components_of<'a>(root: &'a Element, type_id: &[u8; 16]) -> Vec<&'a Element> {
+    let mut found = Vec::new();
+    let mut stack = vec![root];
+    while let Some(next) = stack.pop() {
+        if &next.type_id == type_id {
+            found.push(next);
+        }
+        stack.extend(next.children.iter().rev());
+    }
+    found
+}
+
+/// The replica index of the first component of type `type_id` in the slice `root` that has one
+/// above 0 (0: not replicated).
+fn replicated(root: &Element, type_id: &[u8; 16]) -> Option<u64> {
+    components_of(root, type_id)
+        .into_iter()
+        .find_map(|component| replica_index(component).filter(|index| *index > 0))
+}
+
+/// The projectile component of the slice `root`: its replica index, its `m_stuckLifetime` and
+/// the impact slice it spawns where it hits (`m_spawnOnHitAsset`), when it names one.
+fn projectile_component(root: &Element) -> Option<(u64, f32, Option<AssetRef>)> {
+    let component = components_of(root, &PROJECTILE_COMPONENT_TYPE)
+        .into_iter()
+        .find(|component| replica_index(component).is_some_and(|index| index > 0))?;
+    let stuck_s = first(component, STUCK_LIFETIME)?.as_f32().ok()?;
+    let impact = level_asset(first(component, SPAWN_ON_HIT)).ok().flatten();
+    Some((replica_index(component)?, stuck_s, impact))
+}
+
+/// The area hit of the impact slice `root`: the first component whose `m_damageData` names a
+/// row, with the radius of its shape; `None` when no component of it hurts.
+fn impact_hit(root: &Element) -> Option<(String, String, f32)> {
+    let mut stack = vec![root];
+    while let Some(next) = stack.pop() {
+        let damage = child(next, DAMAGE_DATA);
+        let text = |name: &str| {
+            damage
+                .and_then(|damage| child(damage, name))
+                .and_then(|value| value.as_string().ok())
+                .filter(|value| !value.is_empty())
+                .map(str::to_owned)
+        };
+        if let (Some(table), Some(row)) = (text(DAMAGE_DATA_TABLE), text(DAMAGE_DATA_ENTRY)) {
+            let radius_m = first(next, DAMAGE_SHAPE)
+                .and_then(|shape| first(shape, SHAPE_RADIUS))
+                .and_then(|radius| radius.as_f32().ok())?;
+            return Some((table, row, radius_m));
+        }
+        stack.extend(next.children.iter().rev());
+    }
+    None
+}
+
+/// The impact of the impact slice `root` of asset `asset`; `None` when it hurts no one.
+fn projectile_impact(
+    decoder: &mut TreeDecoder,
+    root: &Element,
+    asset: [u8; 16],
+) -> Option<ProjectileImpact> {
+    let (table, row, radius_m) = impact_hit(root)?;
+    let mut delayed_events: Vec<DelayedEvent> = components_of(root, &DELAYED_EVENT_TYPE)
+        .into_iter()
+        .filter_map(|event| {
+            Some(DelayedEvent {
+                component: replica_index(event).filter(|index| *index > 0)?,
+                delay_s: child(event, DELAY_SECONDS)?.as_f32().ok()?,
+            })
+        })
+        .collect();
+    delayed_events.sort_by_key(|event| event.component);
+    Some(ProjectileImpact {
+        asset,
+        table: decoder.intern(&table),
+        row: decoder.intern(&row),
+        radius_m,
+        ownership_component: replicated(root, &OWNERSHIP),
+        position_component: replicated(root, &NETWORK_POSITION_TYPE),
+        delayed_events,
+    })
+}
+
+/// The asset GUID of each of the dynamic slices `paths` in the asset catalog of `source`; a
+/// catalog that cannot be read is listed in the report and gives none.
+fn slice_assets(
+    source: &GameSource,
+    paths: &BTreeSet<String>,
+    report: &mut AiDataReport,
+) -> Result<HashMap<String, [u8; 16]>, ToolError> {
+    let mut catalog = None;
+    source.for_each_entry(
+        |path| path == ASSET_CATALOG_ENTRY,
+        |_, bytes| {
+            catalog = Some(slice_assets_in(&bytes, SLICES_FOLDER));
+            Ok::<(), ToolError>(())
+        },
+    )?;
+    let assets = match catalog {
+        Some(Ok(assets)) => assets,
+        Some(Err(error)) => {
+            report
+                .skipped
+                .insert(ASSET_CATALOG_ENTRY.to_owned(), error.to_string());
+            return Ok(HashMap::new());
+        }
+        None => {
+            report
+                .skipped
+                .insert(ASSET_CATALOG_ENTRY.to_owned(), "not in the paks".to_owned());
+            return Ok(HashMap::new());
+        }
+    };
+    Ok(assets
+        .into_iter()
+        .filter_map(|(path, (guid, _))| {
+            let path = path.to_lowercase();
+            paths.contains(&path).then_some((path, guid))
+        })
+        .collect())
+}
+
+/// Every attack of the ranged attack database, and the flight and replicated entity of each
+/// projectile slice that a `CAGE-RangedAttack` clip of `actions` names (`SliceOverride`). A slice
+/// that is missing, has no projectile component or is not in the asset catalog, and an impact
+/// slice that is missing, go to the report's skipped files.
 fn ranged_shots(
     source: &GameSource,
     decoder: &mut TreeDecoder,
     actions: &[CageAction],
     report: &mut AiDataReport,
-) -> Result<(Vec<RangedAttack>, Vec<ProjectileSlice>), ToolError> {
+) -> Result<RangedShots, ToolError> {
     let ranged_clip = decoder.intern(RANGED_CLIP);
     let slice_param = decoder.intern(SLICE_OVERRIDE_PARAM);
     let slice_paths: BTreeSet<String> = actions
@@ -1668,47 +2035,38 @@ fn ranged_shots(
         .chain([RANGED_ATTACK_DATABASE.to_owned()])
         .collect();
     let bytes = read_entries(source, &wanted)?;
-    let mut ranged = Vec::new();
-    match bytes
+    let (attacks, streams) = match bytes
         .get(RANGED_ATTACK_DATABASE)
         .map(|bytes| slice_root(bytes))
     {
-        Some(Ok(root)) => {
-            let mut attacks: Vec<_> = ranged_attacks(&root).into_iter().collect();
-            attacks.sort_by(|left, right| left.0.cmp(&right.0));
-            for ((profile, attack), (range_m, radius_m, hit_scan)) in attacks {
-                ranged.push(RangedAttack {
-                    profile: decoder.intern(&profile),
-                    attack: decoder.intern(&attack),
-                    range_m,
-                    radius_m,
-                    hit_scan,
-                });
-            }
-        }
+        Some(Ok(root)) => database_attacks(decoder, &root),
         Some(Err(reason)) => {
             report
                 .skipped
                 .insert(RANGED_ATTACK_DATABASE.to_owned(), reason);
+            (Vec::new(), Vec::new())
         }
         None => {
             report.skipped.insert(
                 RANGED_ATTACK_DATABASE.to_owned(),
                 "not in the paks".to_owned(),
             );
+            (Vec::new(), Vec::new())
         }
-    }
+    };
+    let assets = slice_assets(source, &slice_paths, report)?;
+    let mut flights = Vec::new();
     let mut projectiles = Vec::new();
     for path in &slice_paths {
-        let flight = bytes
+        let root = bytes
             .get(path)
             .ok_or_else(|| "not in the paks".to_owned())
-            .and_then(|bytes| slice_root(bytes))
-            .and_then(|root| {
-                slice_flight(&root).ok_or_else(|| "no projectile component".to_owned())
-            });
+            .and_then(|bytes| slice_root(bytes));
+        let flight = root.as_ref().map_err(String::clone).and_then(|root| {
+            slice_flight(root).ok_or_else(|| "no projectile component".to_owned())
+        });
         match flight {
-            Ok(flight) => projectiles.push(ProjectileSlice {
+            Ok(flight) => flights.push(ProjectileSlice {
                 slice: decoder.intern(path),
                 flight,
             }),
@@ -1716,10 +2074,83 @@ fn ranged_shots(
                 report.skipped.insert(path.clone(), reason);
             }
         }
+        let Ok(root) = root else { continue };
+        let Some((component, stuck_s, impact)) = projectile_component(&root) else {
+            continue;
+        };
+        let Some(asset) = assets.get(path) else {
+            report
+                .skipped
+                .insert(path.clone(), "not in the asset catalog".to_owned());
+            continue;
+        };
+        let ownership = replicated(&root, &OWNERSHIP);
+        projectiles.push((
+            path.clone(),
+            *asset,
+            (component, stuck_s),
+            ownership,
+            impact,
+        ));
     }
-    report.ranged_attacks = ranged.len();
-    report.projectile_slices = projectiles.len();
-    Ok((ranged, projectiles))
+    let impact_paths: HashSet<String> = projectiles
+        .iter()
+        .filter_map(|(_, _, _, _, impact)| impact.as_ref().map(|impact| impact.path.clone()))
+        .collect();
+    let impact_bytes = read_entries(source, &impact_paths)?;
+    let mut entities = Vec::new();
+    for (path, asset, (projectile_component, stuck_lifetime_s), ownership_component, impact) in
+        projectiles
+    {
+        let impact = impact.and_then(|impact| {
+            let root = impact_bytes
+                .get(&impact.path)
+                .ok_or_else(|| "not in the paks".to_owned())
+                .and_then(|bytes| slice_root(bytes));
+            match root {
+                Ok(root) => projectile_impact(decoder, &root, impact.guid),
+                Err(reason) => {
+                    report.skipped.insert(impact.path, reason);
+                    None
+                }
+            }
+        });
+        entities.push(ProjectileEntity {
+            slice: decoder.intern(&path),
+            asset,
+            projectile_component,
+            stuck_lifetime_s,
+            ownership_component,
+            impact,
+        });
+    }
+    report.ranged_attacks = attacks.len();
+    report.projectile_slices = flights.len();
+    report.projectile_entities = entities.len();
+    Ok(RangedShots {
+        attacks,
+        streams,
+        flights,
+        entities,
+    })
+}
+
+/// The rows of each of the damage tables `sheets`, once per unique id.
+fn table_rows(
+    decoder: &mut TreeDecoder,
+    sheets: impl IntoIterator<Item = DamageSheet>,
+) -> Vec<DamageTableRows> {
+    let by_id: BTreeMap<String, Vec<String>> = sheets
+        .into_iter()
+        .map(|sheet| (sheet.unique_id, sheet.rows))
+        .collect();
+    by_id
+        .into_iter()
+        .map(|(table, rows)| DamageTableRows {
+            table: decoder.intern(&table),
+            rows: rows.iter().map(|row| decoder.intern(row)).collect(),
+        })
+        .collect()
 }
 
 /// The parsed animation database at `path` among `adbs`, with its path.
@@ -1735,6 +2166,7 @@ fn database<'a>(
 struct CageBuilder<'a> {
     lists: &'a HashMap<String, ParsedList>,
     lengths: &'a ClipLengths,
+    roots: &'a RootClips,
     actions: Vec<CageAction>,
     index: HashMap<Vec<u8>, u32>,
     unknown_fragments: BTreeMap<String, usize>,
@@ -1812,15 +2244,17 @@ impl CageBuilder<'_> {
                     })
                     .collect(),
             });
-        let variants = self.variants(decoder, &action.fragment, adb);
-        let weapon_variants = self.variants(decoder, &action.fragment, weapon_adb);
+        // The animation moves the body (`AnimationDrivenMotion`); a weapon's entry moves none.
+        let moves = action.motion_multiplier.is_some();
+        let variants = self.variants(decoder, &action.fragment, adb, moves);
+        let weapon_variants = self.variants(decoder, &action.fragment, weapon_adb, false);
         let fragment_cases = action
             .fragment_cases
             .iter()
             .map(|case| FragmentCase {
                 condition: cage_condition(decoder, &case.condition),
                 fragment: decoder.intern(&case.fragment),
-                variants: self.variants(decoder, &case.fragment, adb),
+                variants: self.variants(decoder, &case.fragment, adb, moves),
             })
             .collect();
         CageAction {
@@ -1887,12 +2321,14 @@ impl CageBuilder<'_> {
         }
     }
 
-    /// The entries of `fragment` in the animation database `adb`, with their procedural clips.
+    /// The entries of `fragment` in the animation database `adb`, with their procedural clips,
+    /// and their root motion when the action's animation `moves` the body.
     fn variants(
         &mut self,
         decoder: &mut TreeDecoder,
         fragment: &str,
         adb: Option<(&str, &AnimDatabase)>,
+        moves: bool,
     ) -> Vec<FragmentVariant> {
         let mut variants = Vec::new();
         if let Some((adb_path, clips)) = adb {
@@ -1907,6 +2343,9 @@ impl CageBuilder<'_> {
                         .or_default() += 1;
                     FragmentLength::Unknown
                 });
+                let root_motion = moves
+                    .then(|| self.roots.motion(procedural, &length))
+                    .flatten();
                 variants.push(FragmentVariant {
                     tags: procedural
                         .tags
@@ -1933,6 +2372,7 @@ impl CageBuilder<'_> {
                                 .collect(),
                         })
                         .collect(),
+                    root_motion,
                 });
             }
         }
@@ -2341,6 +2781,116 @@ mod tests {
         assert!(holds(&sides[1], 170.0) && !holds(&sides[0], 170.0));
     }
 
+    /// The test skeleton's clips, `swing` (its root goes 1 m forward over 30 frames of 1/30 s)
+    /// and `still` (the same frames, its root stays), on its skeleton of root `Xform`.
+    fn root_clips() -> RootClips {
+        let bodies = crate::melee_shapes::test_support::bodies();
+        let swing = bodies.clips[crate::melee_shapes::test_support::SWING]
+            .clone()
+            .expect("the swing clip");
+        let mut still = swing.clone();
+        for track in still.tracks.values_mut() {
+            track
+                .positions
+                .iter_mut()
+                .for_each(|(_, at)| *at = [0.0; 3]);
+        }
+        let root = bodies.player.joints[0].controller_id;
+        RootClips {
+            clips: HashMap::from([
+                (crate::melee_shapes::test_support::SWING.to_owned(), swing),
+                (STILL_CLIP.to_owned(), still),
+            ]),
+            roots: HashMap::from([(root, bodies.player)]),
+        }
+    }
+
+    /// A clip whose root stays where it starts.
+    const STILL_CLIP: &str = "still";
+    /// The test clip's length and the frame time of its root path.
+    const SWING_S: f64 = 1.0;
+    const SWING_STEP_MS: f32 = 1_000.0 / 30.0;
+
+    #[test]
+    fn a_moving_actions_entry_gets_the_root_motion_of_its_main_animation() {
+        let parsed = list_actions(GORE_LIST).expect("list");
+        let adb = AnimDatabase::parse(
+            "<AnimDB><FragmentList>\
+             <Attack_Gore><Fragment Tags=\"\"><AnimLayer><Blend ExitTime=\"0\"/>\
+             <Animation name=\"swing\"/></AnimLayer></Fragment>\
+             <Fragment Tags=\"Armadillo\"><AnimLayer><Blend ExitTime=\"0\"/>\
+             <Animation name=\"still\"/></AnimLayer></Fragment>\
+             <Fragment Tags=\"Loop\"><AnimLayer><Blend ExitTime=\"0\"/>\
+             <Animation name=\"swing\" flags=\"Loop\"/></AnimLayer></Fragment></Attack_Gore>\
+             <r_R2_F><Fragment Tags=\"\"><AnimLayer><Blend ExitTime=\"0\"/>\
+             <Animation name=\"swing\"/></AnimLayer></Fragment></r_R2_F>\
+             </FragmentList></AnimDB>",
+        )
+        .expect("adb");
+        let known = lengths(&[
+            (crate::melee_shapes::test_support::SWING, Ok(SWING_S)),
+            (STILL_CLIP, Ok(SWING_S)),
+        ]);
+        let roots = root_clips();
+        let lists = HashMap::new();
+        let mut builder = CageBuilder {
+            lists: &lists,
+            lengths: &known,
+            roots: &roots,
+            actions: Vec::new(),
+            index: HashMap::new(),
+            unknown_fragments: BTreeMap::new(),
+        };
+        let mut decoder = TreeDecoder::default();
+        let list = decoder.intern("gore.actionlist");
+        let database = Some(("gore.adb", &adb));
+        let gore = builder.action(
+            &mut decoder,
+            list,
+            &parsed.actions[0],
+            &parsed.conditions,
+            database,
+            database,
+        );
+        assert_eq!(gore.motion_multiplier, Some(1.0), "the multiplier is kept");
+        let motion = gore.variants[0]
+            .root_motion
+            .as_ref()
+            .expect("the swing moves");
+        assert!(
+            (motion.step_ms - SWING_STEP_MS).abs() < 1e-3,
+            "{}",
+            motion.step_ms
+        );
+        assert_eq!(motion.offsets.len(), 31, "an offset per frame, both ends");
+        let end = motion.offsets.last().expect("an end");
+        assert!(
+            end[0].abs() < 1e-4 && (end[1] - 1.0).abs() < 1e-4,
+            "{end:?}"
+        );
+        assert_eq!(gore.variants[1].root_motion, None, "a root that stays");
+        assert_eq!(gore.variants[2].root_motion, None, "a loop");
+        assert!(
+            gore.weapon_variants
+                .iter()
+                .all(|variant| variant.root_motion.is_none()),
+            "a weapon's entry moves no body"
+        );
+        let reaction = builder.action(
+            &mut decoder,
+            list,
+            &parsed.actions[1],
+            &parsed.conditions,
+            database,
+            None,
+        );
+        assert_eq!(reaction.motion_multiplier, None);
+        assert_eq!(
+            reaction.variants[0].root_motion, None,
+            "no multiplier: no root motion"
+        );
+    }
+
     #[test]
     fn an_action_list_gives_tasks_completion_motion_and_tags() {
         let parsed = list_actions(GORE_LIST).expect("list");
@@ -2694,5 +3244,222 @@ mod tests {
             [(crc("m_agentRadius"), Value::Float(0.5))]
         );
         assert!(run.select_position.is_some());
+    }
+
+    /// A field of no class: its name and its value bytes.
+    fn field_of(name: &str, value: Vec<u8>, children: Vec<Element>) -> Element {
+        Element {
+            name_crc: Some(crc(name)),
+            version: None,
+            type_id: [0; 16],
+            value,
+            children,
+        }
+    }
+
+    /// A component of type `type_id` whose base class holds its replica index `replica`.
+    fn component(type_id: [u8; 16], replica: u32, mut fields: Vec<Element>) -> Element {
+        let index = Element {
+            name_crc: Some(nw_world::level_script::REPLICA_INDEX_NAME),
+            ..field_of("", replica.to_be_bytes().to_vec(), Vec::new())
+        };
+        fields.push(field_of(BASE_CLASS, Vec::new(), vec![index]));
+        Element {
+            type_id,
+            ..field_of("element", Vec::new(), fields)
+        }
+    }
+
+    /// A damage component as the grenadier bomb's explosion holds it: the radius under its
+    /// server facet's `m_shape`, the row in `m_damageData`.
+    fn damage_component(table: &str, row: &str, radius_m: f32) -> Element {
+        let shape = field_of(
+            DAMAGE_SHAPE,
+            Vec::new(),
+            vec![field_of(
+                "element",
+                Vec::new(),
+                vec![float(SHAPE_RADIUS, radius_m)],
+            )],
+        );
+        component(
+            [7; 16],
+            0,
+            vec![
+                field_of("m_serverFacetPtr", Vec::new(), vec![shape]),
+                field_of(
+                    DAMAGE_DATA,
+                    Vec::new(),
+                    vec![text(DAMAGE_DATA_TABLE, table), text(DAMAGE_DATA_ENTRY, row)],
+                ),
+            ],
+        )
+    }
+
+    /// `drowned_miner_bomb_explosion.dynamicslice` as the paks hold it: ownership on 1, the
+    /// position on 2, a delayed event of 5 s on 3, the damage component (not replicated) and an
+    /// empty damage component.
+    #[test]
+    fn an_impact_slice_gives_its_damage_row_radius_and_replicated_states() {
+        let root = field_of(
+            "root",
+            Vec::new(),
+            vec![
+                component(OWNERSHIP, 1, Vec::new()),
+                component(NETWORK_POSITION_TYPE, 2, Vec::new()),
+                component(DELAYED_EVENT_TYPE, 3, vec![float(DELAY_SECONDS, 5.0)]),
+                damage_component("", "", 0.0),
+                damage_component(
+                    "UndeadGrenadierDamageTable",
+                    "Drowned_Miner_Bomb_Explosion",
+                    2.0,
+                ),
+            ],
+        );
+        let mut decoder = TreeDecoder::default();
+        let impact = projectile_impact(&mut decoder, &root, [9; 16]).expect("an impact");
+        assert_eq!(decoder.name(impact.table), "UndeadGrenadierDamageTable");
+        assert_eq!(decoder.name(impact.row), "Drowned_Miner_Bomb_Explosion");
+        assert_eq!(
+            (
+                impact.asset,
+                impact.radius_m,
+                impact.ownership_component,
+                impact.position_component
+            ),
+            ([9; 16], 2.0, Some(1), Some(2))
+        );
+        assert_eq!(
+            impact.delayed_events,
+            [DelayedEvent {
+                component: 3,
+                delay_s: 5.0
+            }]
+        );
+        let harmless = field_of("root", Vec::new(), vec![damage_component("", "", 0.0)]);
+        assert!(projectile_impact(&mut decoder, &harmless, [9; 16]).is_none());
+    }
+
+    /// An asset reference as `m_spawnOnHitAsset` holds it (Observed in
+    /// `drowned_miner_bomb.dynamicslice`): the GUID, then at byte 48 the length of the path hint.
+    fn asset_value(name: &str, guid: [u8; 16], hint: &str) -> Element {
+        const HINT_LENGTH_AT: usize = 48;
+        let mut value = guid.to_vec();
+        value.resize(HINT_LENGTH_AT, 0);
+        value.extend((hint.len() as u64).to_be_bytes());
+        value.extend(hint.as_bytes());
+        field_of(name, value, Vec::new())
+    }
+
+    /// `drowned_miner_bomb.dynamicslice`: ownership on 1, the projectile on 2, its explosion
+    /// named as an editor slice.
+    #[test]
+    fn a_projectile_slice_gives_its_components_and_its_impact_slice() {
+        const EXPLOSION: [u8; 16] = [
+            0xf0, 0x65, 0xc8, 0x6b, 0x55, 0xad, 0x5d, 0xd8, 0x87, 0xde, 0x67, 0x0c, 0xec, 0xd7,
+            0x70, 0x3f,
+        ];
+        let root = field_of(
+            "root",
+            Vec::new(),
+            vec![
+                component(OWNERSHIP, 1, Vec::new()),
+                component(
+                    PROJECTILE_COMPONENT_TYPE,
+                    2,
+                    vec![
+                        float(STUCK_LIFETIME, 0.7),
+                        asset_value(
+                            SPAWN_ON_HIT,
+                            EXPLOSION,
+                            "slices/items/weapons/drowned_miner_bomb_explosion.slice",
+                        ),
+                    ],
+                ),
+            ],
+        );
+        let (replica, stuck_s, impact) = projectile_component(&root).expect("a projectile");
+        assert_eq!((replica, stuck_s), (2, 0.7));
+        assert_eq!(replicated(&root, &OWNERSHIP), Some(1));
+        assert_eq!(
+            impact,
+            Some(AssetRef {
+                guid: EXPLOSION,
+                path: "slices/items/weapons/drowned_miner_bomb_explosion.dynamicslice".to_owned(),
+            })
+        );
+        let plain = field_of(
+            "root",
+            Vec::new(),
+            vec![component(
+                PROJECTILE_COMPONENT_TYPE,
+                1,
+                vec![float(STUCK_LIFETIME, 2.5)],
+            )],
+        );
+        assert_eq!(projectile_component(&plain), Some((1, 2.5, None)));
+        assert_eq!(replicated(&plain, &OWNERSHIP), None);
+    }
+
+    /// `AI_Undead/Grenadier_Bomb`'s arc settings in the ranged attack database; with
+    /// `m_useArcTrajectories` off an attack has none.
+    #[test]
+    fn a_ranged_attack_arcs_only_with_its_arc_settings_on() {
+        let data = |enabled: u8| {
+            field_of(
+                "value2",
+                Vec::new(),
+                vec![field_of(
+                    ARC_SETTINGS,
+                    Vec::new(),
+                    vec![
+                        field_of(ARC_ENABLED, vec![enabled], Vec::new()),
+                        float(ARC_LOB_MIN, 0.0),
+                        float(ARC_LOB_MAX, 0.4),
+                        float(ARC_GRAVITY_MIN, 10.0),
+                        float(ARC_GRAVITY_MAX, 15.0),
+                        float(ARC_DISTANCE_MIN, 3.0),
+                        float(ARC_DISTANCE_MAX, 4.0),
+                    ],
+                )],
+            )
+        };
+        assert_eq!(
+            arc_trajectory(&data(1)),
+            Some(ArcTrajectory {
+                lob_height_m: [0.0, 0.4],
+                gravity_mps2: [10.0, 15.0],
+                distance_m: [3.0, 4.0],
+            })
+        );
+        assert_eq!(arc_trajectory(&data(0)), None);
+    }
+
+    #[test]
+    fn a_damage_sheet_keeps_its_row_ids_in_sheet_order() {
+        let sheet = Datasheet {
+            type_name: "DamageData".to_owned(),
+            unique_id: "FTUEDamageTableMiner".to_owned(),
+            columns: vec![nw_formats::datasheet::Column {
+                name: DAMAGE_ID_COLUMN.to_owned(),
+                kind: nw_formats::datasheet::ColumnKind::String,
+            }],
+            rows: vec![
+                vec!["Drowned_Miner_Bomb".to_owned()],
+                vec!["Drowned_Miner_Bomb_Explosion".to_owned()],
+            ],
+        };
+        let mut decoder = TreeDecoder::default();
+        let rows = table_rows(&mut decoder, [DamageSheet::of(sheet)]);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(decoder.name(rows[0].table), "FTUEDamageTableMiner");
+        assert_eq!(
+            rows[0]
+                .rows
+                .iter()
+                .map(|row| decoder.name(*row))
+                .collect::<Vec<_>>(),
+            ["Drowned_Miner_Bomb", "Drowned_Miner_Bomb_Explosion"]
+        );
     }
 }

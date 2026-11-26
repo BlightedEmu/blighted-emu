@@ -2921,6 +2921,58 @@ mod tests {
     }
 
     #[test]
+    fn a_mob_in_a_closed_ring_of_the_walk_map_walks_home() {
+        // Live 2026-11-26 00:17:08: a sailor past its leash stood in one open cell of the walk
+        // map with closed cells all around it, found no way home and reset every 3.5 s for
+        // minutes. A mob on its way home that the map gives no way walks without the map.
+        const RING_FROM_M: f32 = 1.0;
+        const RING_TO_M: f32 = 3.0;
+        const UNTIL_MS: u64 = 30_000;
+        const HOME_M: f32 = 1.0;
+        /// Flat ground whose walk map closes a ring around `middle`, the middle open.
+        struct Ring {
+            middle: Position,
+        }
+        impl Ring {
+            fn closed(&self, feet: Position) -> bool {
+                (RING_FROM_M..=RING_TO_M).contains(&feet.horizontal_distance(self.middle))
+            }
+        }
+        impl Ground for Ring {
+            fn height_at(&self, _: f32, _: f32) -> Option<f32> {
+                Some(HEIGHT)
+            }
+
+            fn no_stand(&self, feet: Position) -> bool {
+                self.closed(feet)
+            }
+
+            fn closed_by_walk_map(&self, feet: Position) -> bool {
+                self.closed(feet)
+            }
+        }
+        let mut mobs = mobs(vec![spawn_at(SPAWN_X, TEST_MOB, TEST_LEVEL)]);
+        mobs.set_cells(every);
+        let entity = mob_entity(0);
+        let home = at(&mobs, 0);
+        let mob = mobs.get_mut(entity).expect("mob");
+        mob.position.x += TEST_LEASH_M + 5.0;
+        let ring = Ring {
+            middle: mob.position,
+        };
+        let far = player_at(SPAWN_X + 2.0 * TEST_LEASH_M);
+        for now in (0..UNTIL_MS).step_by(TICK_MS as usize) {
+            mobs.tick(&[far], now, &ring, 1);
+        }
+        assert!(
+            at(&mobs, 0).horizontal_distance(home) < HOME_M,
+            "home: {:?}",
+            at(&mobs, 0)
+        );
+        assert_eq!(mobs.state(entity), Some(MobState::Idle));
+    }
+
+    #[test]
     fn a_tree_mob_without_a_target_stands_at_its_spawn() {
         let mut mobs = mobs(vec![spawn_at(SPAWN_X, TEST_MOB, TEST_LEVEL)]);
         mobs.set_cells(every);
@@ -4396,6 +4448,272 @@ mod retail_tests {
     }
 
     #[test]
+    fn janszoon_lands_most_close_attacks_on_a_player_who_circles_him() {
+        // Live 2026-11-26: the first mate missed a player who moved around him (00:21 to 00:23
+        // UTC: 13 hits, 13 `out of reach`). A close attack lands when the player stands in the
+        // reach of its damage window from his body's middle while the window is open (the sim's
+        // swing judge, `SimWorld::mob_swing_reaches`). The player walks a circle of 2.5 m around
+        // his spawn. Sim check 2026-11-26: 20 of 20 close strikes land with the strafe facing of
+        // `nw_sim_core::steering::StrafeFacing::Converge`, and 23 of 23 with the config's turn
+        // cap, so at a walk the facing rule does not decide it; at the default speed of 5.5 m/s
+        // both land 6 of 18 (Unknown: the retail rate against a player that fast).
+        const JANSZOON_ID: &str = "Corrupted_Sailor_StarterBeach_Named_00";
+        const JANSZOON: &str = "7214ec6831b058f2a3b60f9b5c285e6c";
+        const FIGHT_MS: u64 = 120_000;
+        const CIRCLE_M: f32 = 2.5;
+        const CLOSE_PREFIX: &str = "Attack_Close_";
+        const MIN_CLOSE_STRIKES: usize = 5;
+        const MS_PER_S: f32 = 1_000.0;
+        let mut mobs = retail_mobs(
+            vec![spawn_at(SPAWN_X, JANSZOON_ID, TEST_LEVEL)],
+            &[(JANSZOON_ID, asset(JANSZOON))],
+        );
+        let mob = mob_entity(0);
+        let body_m = mobs.capsule(mob).radius_m;
+        let mut fragments = Vec::new();
+        let mut serial = None;
+        // The open close strikes: until when each is judged, and its reach.
+        let mut open: Vec<(u64, f32)> = Vec::new();
+        let (mut landed, mut missed) = (0_usize, 0_usize);
+        let centre = at(&mobs, 0);
+        for now in (0..FIGHT_MS).step_by(TICK_MS as usize) {
+            #[allow(clippy::cast_precision_loss, reason = "ms of a two-minute fight")]
+            let angle = nw_sim_core::character::WALK_SPEED_MPS / CIRCLE_M * now as f32 / MS_PER_S;
+            let player = Seen {
+                entity: PLAYER,
+                position: Position {
+                    x: centre.x - CIRCLE_M * angle.sin(),
+                    y: centre.y + CIRCLE_M * angle.cos(),
+                    ..centre
+                },
+            };
+            let close = fragments
+                .last()
+                .is_some_and(|fragment: &String| fragment.starts_with(CLOSE_PREFIX));
+            for strike in mobs
+                .tick(&[player], now, &Flat, 1)
+                .into_iter()
+                .filter_map(|hit| hit.strike)
+                .filter(|_| close)
+            {
+                open.push((
+                    strike.open_until_ms.unwrap_or(now),
+                    strike.reach.reach_m + body_m + nw_sim_core::character::PLAYER_RADIUS_M,
+                ));
+            }
+            played(&mobs, mob, &mut serial, &mut fragments);
+            let distance = at(&mobs, 0).horizontal_distance(player.position);
+            open.retain(|(until_ms, reach_m)| {
+                if distance <= *reach_m {
+                    landed += 1;
+                    false
+                } else if now >= *until_ms {
+                    missed += 1;
+                    false
+                } else {
+                    true
+                }
+            });
+        }
+        assert!(landed + missed >= MIN_CLOSE_STRIKES, "{fragments:?}");
+        assert!(
+            landed > missed,
+            "landed {landed}, missed {missed}: {fragments:?}"
+        );
+    }
+
+    /// One play of a fragment: where the mob stood and faced at its start, where it stood when
+    /// the next fragment started, and the root totals of its action's body entries (the length
+    /// of each entry's last root offset times the action's multiplier, m).
+    struct FragmentMove {
+        from: Position,
+        yaw: f32,
+        to: Position,
+        root_totals_m: Vec<f32>,
+    }
+
+    impl FragmentMove {
+        /// How far it went against its facing at the start.
+        fn backward_m(&self) -> f32 {
+            let (dx, dy) = (self.to.x - self.from.x, self.to.y - self.from.y);
+            -(dx * -self.yaw.sin() + dy * self.yaw.cos())
+        }
+
+        /// Whether it went one of its action's root totals, within `margin_m`.
+        fn went_its_root(&self, margin_m: f32) -> bool {
+            let went = self.from.horizontal_distance(self.to);
+            self.root_totals_m
+                .iter()
+                .any(|total| (went - total).abs() <= margin_m)
+        }
+    }
+
+    /// The plays of fragment `fragment` by mob `entity` while `player` stands still on `ground`
+    /// for `fight_ms`.
+    fn fragment_moves(
+        mobs: &mut Mobs,
+        entity: u64,
+        (player, ground): (Seen, &(dyn Ground + Sync)),
+        fight_ms: u64,
+        fragment: &str,
+    ) -> Vec<FragmentMove> {
+        let mut moves = Vec::new();
+        let mut playing: Option<(u32, Position, f32, u32)> = None;
+        for now in (0..fight_ms).step_by(TICK_MS as usize) {
+            mobs.tick(&[player], now, ground, 1);
+            let here = mobs.get(entity).expect("the mob").position;
+            let Some((shown, _, name)) = mobs.shown(entity) else {
+                continue;
+            };
+            if playing.is_some_and(|(serial, ..)| serial == shown.serial) {
+                continue;
+            }
+            if let Some((_, from, yaw, action)) = playing.take() {
+                let cage = mobs.ai().cage_action(action).expect("its action");
+                let multiplier = cage.motion_multiplier.unwrap_or_default();
+                let root_totals_m = cage
+                    .variants
+                    .iter()
+                    .filter_map(|variant| variant.root_motion.as_ref()?.offsets.last())
+                    .map(|end| end[0].hypot(end[1]) * multiplier)
+                    .collect();
+                moves.push(FragmentMove {
+                    from,
+                    yaw,
+                    to: here,
+                    root_totals_m,
+                });
+            }
+            if name == fragment {
+                let yaw = mobs.facing(entity).expect("a tree mob");
+                playing = Some((shown.serial, here, yaw, shown.action));
+            }
+        }
+        moves
+    }
+
+    /// The root step a tick may lose or the floor may shorten: a tick of the root at its fastest
+    /// (our engineering limit for the root totals; the steps are 33 ms of a few metres a second).
+    const ROOT_MARGIN_M: f32 = 0.2;
+
+    #[test]
+    fn janszoon_dodges_back_by_the_root_motion_of_his_dodge() {
+        // Retail mobs moved in their dodges (13 ledgers, 2026-11-26: `Dodge_B` of the grey wolves
+        // 1.35 to 1.72 m backward over 7 moving starts, of the lost fencers 2.03 and 2.22 m); the
+        // sim's first mate moved 0 m in 3 of 3 (live 2026-11-26 01:46 to 01:47 UTC). No retail
+        // ledger holds a `Dodge_B` of the first mate: his move is his animation's root.
+        const JANSZOON_ID: &str = "Corrupted_Sailor_StarterBeach_Named_00";
+        const JANSZOON: &str = "7214ec6831b058f2a3b60f9b5c285e6c";
+        const FIGHT_MS: u64 = 240_000;
+        const DODGE: &str = "Dodge_B";
+        let mut mobs = retail_mobs(
+            vec![spawn_at(SPAWN_X, JANSZOON_ID, TEST_LEVEL)],
+            &[(JANSZOON_ID, asset(JANSZOON))],
+        );
+        let player = Seen {
+            entity: PLAYER,
+            position: Position {
+                y: super::tests::ROW_Y + 2.0,
+                ..player_at(SPAWN_X).position
+            },
+        };
+        let moves = fragment_moves(&mut mobs, mob_entity(0), (player, &Flat), FIGHT_MS, DODGE);
+        assert!(!moves.is_empty(), "he dodges back");
+        for dodge in &moves {
+            assert!(
+                dodge.backward_m() > 0.0 && dodge.went_its_root(ROOT_MARGIN_M),
+                "{:.2} m back, {:.2} m in all, roots {:?}",
+                dodge.backward_m(),
+                dodge.from.horizontal_distance(dodge.to),
+                dodge.root_totals_m
+            );
+        }
+    }
+
+    #[test]
+    fn the_javelineer_dashes_back_by_the_root_motion_of_its_dash() {
+        // Retail `Playthrough_Part_01` 4,692,969 ms: the ruin javelineer's `Dash_B` moved it 4.53 m
+        // back (the one retail dash of this slice in 13 ledgers); the sim's moved 0 m (live
+        // 2026-11-26 00:08 to 00:10 UTC, findings section 7).
+        const JAVELINEER_ID: &str = "AncientGuardian_Javelineer_12";
+        const JAVELINEER: &str = "32711ff8f3a15609ac62ccb18246a947";
+        const FIGHT_MS: u64 = 240_000;
+        const DASH: &str = "Dash_B";
+        let mut mobs = retail_mobs(
+            vec![spawn_at(SPAWN_X, JAVELINEER_ID, TEST_LEVEL)],
+            &[(JAVELINEER_ID, asset(JAVELINEER))],
+        );
+        let player = Seen {
+            entity: PLAYER,
+            position: Position {
+                y: super::tests::ROW_Y + 2.0,
+                ..player_at(SPAWN_X).position
+            },
+        };
+        let moves = fragment_moves(&mut mobs, mob_entity(0), (player, &Flat), FIGHT_MS, DASH);
+        assert!(!moves.is_empty(), "it dashes back");
+        for dash in &moves {
+            assert!(
+                dash.backward_m() > 0.0 && dash.went_its_root(ROOT_MARGIN_M),
+                "{:.2} m back, {:.2} m in all, roots {:?}",
+                dash.backward_m(),
+                dash.from.horizontal_distance(dash.to),
+                dash.root_totals_m
+            );
+        }
+    }
+
+    #[test]
+    fn root_moves_on_the_real_ground_never_end_on_a_closed_place() {
+        // The first mate's dodges on his beach and the javelineer's dashes on its ruin platform:
+        // a root move goes over the floor rule of every mob move, so with the walk map on
+        // (`NW_TEST_WALK_MAP`) it never ends on a place the map closes.
+        const JAVELINEER_ID: &str = "AncientGuardian_Javelineer_12";
+        const JAVELINEER: &str = "32711ff8f3a15609ac62ccb18246a947";
+        const JAVELINEER_SPAWN: [f32; 3] = [8130.161, 3566.9536, 120.903_725];
+        const FIGHT_MS: u64 = 120_000;
+        const NEAR_M: f32 = 2.0;
+        let (mut mobs, ground) = janszoon_on_real_ground();
+        let player = player_near_janszoon(&ground, NEAR_M, 0.0);
+        let dodges = fragment_moves(
+            &mut mobs,
+            mob_entity(0),
+            (player, &ground),
+            FIGHT_MS,
+            "Dodge_B",
+        );
+        let (mut mobs, ground) = mob_on_real_ground(JAVELINEER_ID, JAVELINEER, JAVELINEER_SPAWN);
+        let player = Seen {
+            entity: PLAYER,
+            position: Position {
+                x: JAVELINEER_SPAWN[0] - NEAR_M,
+                y: JAVELINEER_SPAWN[1],
+                z: JAVELINEER_SPAWN[2],
+            },
+        };
+        let dashes = fragment_moves(
+            &mut mobs,
+            mob_entity(0),
+            (player, &ground),
+            FIGHT_MS,
+            "Dash_B",
+        );
+        assert!(
+            !dodges.is_empty() && !dashes.is_empty(),
+            "both move by their roots"
+        );
+        for (kind, played) in [("dodge", &dodges), ("dash", &dashes)] {
+            for one in played {
+                assert!(
+                    !ground.closed_by_walk_map(one.to),
+                    "a {kind} ends on a closed place: {:?}",
+                    one.to
+                );
+            }
+        }
+    }
+
+    #[test]
     fn janszoon_walks_home_after_the_player_leaves() {
         // Live 2026-10-29: after the player got away, Janszoon stayed where the fight ended.
         const JANSZOON_ID: &str = "Corrupted_Sailor_StarterBeach_Named_00";
@@ -4848,27 +5166,26 @@ mod retail_tests {
             }
             let out = at(&mobs, 0);
             let mut nearest = out.horizontal_distance(home);
+            // A player who stays stands where the walk out ended, beside the mob. (Placed again
+            // beside the mob at every tick, the player went on leading it: since the mobs move by
+            // the root motion of their attacks, it followed such a player attack by attack, past
+            // its leash, 49.7 m from home on bearing 3/4 of a turn.)
+            let beside = {
+                let (x, y) = (
+                    out.x + LEAD_M * bearing.cos(),
+                    out.y + LEAD_M * bearing.sin(),
+                );
+                Seen {
+                    entity: PLAYER,
+                    position: Position {
+                        x,
+                        y,
+                        z: ground.height_at(x, y).unwrap_or(out.z),
+                    },
+                }
+            };
             for later in (now..now + AFTER_MS).step_by(TICK_MS as usize) {
-                let beside = |mobs: &Mobs| {
-                    let here = at(mobs, 0);
-                    let (x, y) = (
-                        here.x + LEAD_M * bearing.cos(),
-                        here.y + LEAD_M * bearing.sin(),
-                    );
-                    Seen {
-                        entity: PLAYER,
-                        position: Position {
-                            x,
-                            y,
-                            z: ground.height_at(x, y).unwrap_or(here.z),
-                        },
-                    }
-                };
-                let seen: Vec<Seen> = if stay {
-                    vec![beside(&mobs)]
-                } else {
-                    Vec::new()
-                };
+                let seen: Vec<Seen> = if stay { vec![beside] } else { Vec::new() };
                 if stay && later % HIT_EVERY_MS < TICK_MS {
                     mobs.provoke(mob_entity(0), PLAYER, later);
                 }
@@ -5036,6 +5353,51 @@ mod retail_tests {
             }
         }
         assert!(idle.is_empty(), "{idle:#?}");
+    }
+
+    /// A grenadier of the beach camps throws at a player some metres away. Live 2026-11-26
+    /// 00:20:26 (and 2026-11-24 06:12:13): its tree picked `Drowned_Miner_Throw` every 3 s and
+    /// the task ended in the same tick, with no throw: every throw fragment of its animation
+    /// database needs the tag `Torch_OH`, which only its torch's `OffHandMannequinTag` gives.
+    #[test]
+    fn a_beach_grenadier_throws_at_a_player_some_metres_away() {
+        const ID: &str = "Corrupted_Sailor_Miner";
+        const ASSET: &str = "39a5253b58d1517c8cd67b7a6b77fbb0";
+        const THROW: &str = "Drowned_Miner_Throw";
+        const DISTANCE_M: f32 = 7.5;
+        const RUN_MS: u64 = 20_000;
+        let spawn = nw_world::WorldFile::load(&nw_content::layout::repo_layout(), OPEN_WORLD_LEVEL)
+            .expect("world file")
+            .vitals
+            .iter()
+            .find(|vitals| vitals.vitals_id == lowercase_crc32(ID))
+            .map(|vitals| [vitals.position[0], vitals.position[1]])
+            .expect("a spawn of the grenadier");
+        let (mut mobs, ground, home) = mob_at_spawn(ID, ASSET, spawn);
+        let (x, y) = (home.x, home.y + DISTANCE_M);
+        let player = Seen {
+            entity: PLAYER,
+            position: Position {
+                x,
+                y,
+                z: ground.height_at(x, y).unwrap_or(home.z),
+            },
+        };
+        mobs.provoke(mob_entity(0), PLAYER, 0);
+        let mut trace = (None, Vec::new());
+        let mut shots = 0;
+        for now in (0..RUN_MS).step_by(TICK_MS as usize) {
+            for hit in mobs.tick(&[player], now, &ground, 1) {
+                shots += usize::from(hit.strike.is_some_and(|strike| strike.ranged.is_some()));
+            }
+            played(&mobs, mob_entity(0), &mut trace.0, &mut trace.1);
+        }
+        assert!(
+            trace.1.iter().any(|fragment| fragment == THROW),
+            "it plays its throw: {:?}",
+            trace.1
+        );
+        assert!(shots > 0, "its throw is a shot: {:?}", trace.1);
     }
 
     /// A player on the real ground `distance_m` in front of Janszoon (yaw 0 faces +y).
@@ -5441,6 +5803,8 @@ mod retail_tests {
         const PLACES: u16 = 12;
         const ON_PLATFORM_M: f32 = 1.0;
         const FIGHT_MS: u64 = 25_000;
+        /// The longest crossing of closed places out of a pocket, ms (a walk of 2 m).
+        const CROSSING_MS: u64 = 1_000;
         let ground = nw_sim_core::walk_map::WalkMapGround::new(
             real_ground(),
             nw_sim_core::walk_map::MOB_BODY,
@@ -5477,19 +5841,101 @@ mod retail_tests {
                 )
                 .expect("spawned");
             let mut fought = false;
+            // A mob in a pocket of the map crosses closed places on its way out
+            // (`mob_path::find_path`): it may be off the map for that long, not longer.
+            let mut off_since = None;
             for now in (0..FIGHT_MS).step_by(TICK_MS as usize) {
                 mobs.tick(&[player], now, &ground, 1);
                 let at = mobs.get(entity).expect("the mob").position;
-                assert!(
-                    !ground.closed_by_walk_map(at),
-                    "player at ({x:.1}, {y:.1}), {now} ms: it stands off the map at {at:?}"
-                );
+                if ground.closed_by_walk_map(at) {
+                    let since = *off_since.get_or_insert(now);
+                    assert!(
+                        now - since <= CROSSING_MS,
+                        "player at ({x:.1}, {y:.1}), {since} to {now} ms: it stands off the map at {at:?}"
+                    );
+                } else {
+                    off_since = None;
+                }
                 fought |= mobs.target(entity) == Some(PLAYER);
             }
             assert!(fought, "it takes the player at ({x:.1}, {y:.1})");
             fights += 1;
         }
         assert!(fights >= 6, "player places on the platform: {fights}");
+    }
+
+    #[test]
+    fn a_mob_in_a_pocket_of_the_walk_map_finds_its_way_home_without_it() {
+        // Live 2026-11-26 00:17:08: a sailor of the beach camp gave up a player on a raised
+        // object, stood under a low roof 28.5 m from its spawn and reset every 3.5 s for
+        // minutes without a step home (`ResetToHome`, `reachable=false`).
+        const STOOD: Position = Position {
+            x: 7161.24,
+            y: 3126.70,
+            z: 42.55,
+        };
+        const HOME: Position = Position {
+            x: 7161.87,
+            y: 3155.24,
+            z: 43.21,
+        };
+        const HOME_M: f32 = 1.0;
+        const OUT_M: f32 = 1.0;
+        // The map once, over the level's own ground (`real_ground` may hold the map already).
+        let level = real_ground();
+        let ground = nw_sim_core::walk_map::WalkMapGround::new(
+            level.ground(),
+            nw_sim_core::walk_map::MOB_BODY,
+            true,
+        );
+        // The place is a pocket of the map: the search over the map gives the way without it.
+        let plan = crate::mob_path::find_path(&ground, STOOD, HOME, None, false).expect("a way");
+        assert!(plan.off_map, "the way out of the pocket is off the map");
+        let end = plan.points.last().copied().expect("its end");
+        assert!(
+            !ground.closed_by_walk_map(end) && end.horizontal_distance(STOOD) > OUT_M,
+            "the way ends on the map outside the pocket: {end:?}"
+        );
+        // From there the map gives the whole way home.
+        let home = crate::mob_path::find_path(&ground, end, HOME, None, false).expect("a way");
+        let last = home.points.last().copied().expect("its end");
+        assert!(
+            home.complete && !home.off_map && last.horizontal_distance(HOME) <= HOME_M,
+            "the way home ends {} m from home, complete {}",
+            last.horizontal_distance(HOME),
+            home.complete
+        );
+    }
+
+    #[test]
+    fn a_mob_in_a_pocket_beside_a_crate_finds_a_way_to_its_target() {
+        // Live 2026-11-26 01:57:16 to 01:58:09: a sailor of a cave stood on a thin mesh inside a
+        // crate's box, a player 6.5 m away and 1.3 m higher, and its run failed 1,002 times.
+        const STOOD: Position = Position {
+            x: 7310.26,
+            y: 2861.71,
+            z: 53.38,
+        };
+        const PLAYER_AT: Position = Position {
+            x: 7310.64,
+            y: 2855.23,
+            z: 54.69,
+        };
+        const NEARER_M: f32 = 1.0;
+        let level = real_ground();
+        let ground = nw_sim_core::walk_map::WalkMapGround::new(
+            level.ground(),
+            nw_sim_core::walk_map::MOB_BODY,
+            true,
+        );
+        let plan =
+            crate::mob_path::find_path(&ground, STOOD, PLAYER_AT, None, false).expect("a way");
+        let end = plan.points.last().copied().expect("its end");
+        assert!(
+            end.horizontal_distance(PLAYER_AT) + NEARER_M < STOOD.horizontal_distance(PLAYER_AT),
+            "the way leaves the place: it ends {} m from the player",
+            end.horizontal_distance(PLAYER_AT)
+        );
     }
 
     /// The walk map plan's gate 3, the part that needs no running stack: patrol mobs of the open

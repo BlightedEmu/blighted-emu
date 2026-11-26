@@ -41,8 +41,7 @@ use super::attack::Pace;
 use super::crafting::{CARD_COMPONENT, Station, dynamic_ref, unowned};
 use super::{Player, SimWorld};
 use crate::combat::{AttackOutcome, AttackRefusal};
-use crate::mob_ai::{SpellCast, Strike};
-use crate::mobs::{MobAttackIntent, MobReach};
+use crate::mob_ai::SpellCast;
 
 /// The radius of a spell row without one: its target only (Inferred: a point spell hits what is
 /// on the point).
@@ -54,13 +53,7 @@ const SPELL_ENTITY_MIN_MS: u64 = 1_000;
 const SPELL_ENTITY_NAMESPACE: u64 = 0x7370_656c_6c65_6e74;
 /// Retail: `m_aoeRadiusScaling` 1 and permission rule 1 in the spell groups read.
 const RADIUS_SCALE: f32 = 1.0;
-const PERMISSION_RULE: u8 = 1;
-/// A spell area reaches by its radius, not by a swing.
-const AREA_REACH: MobReach = MobReach {
-    lunge_max_m: 0.0,
-    lunge_turn_rad: 0.0,
-    reach_m: 0.0,
-};
+pub(super) const PERMISSION_RULE: u8 = 1;
 /// The heal base of a mob's spell is its plain hit, before any armor (Inferred: a player's is
 /// its weapon's damage, [`SimWorld::spell_heal_base`]).
 const NO_ARMOR_SHARE: f64 = 0.0;
@@ -225,6 +218,12 @@ impl SpellArea {
             self.centre,
         ))
     }
+}
+
+/// The turn of an entity that faces `yaw` (about the up axis).
+pub(super) fn yaw_rotation(yaw: f32) -> Rotation {
+    let half = yaw / 2.0;
+    Rotation::of_quaternion([0.0, 0.0, half.sin(), half.cos()])
 }
 
 /// Where and when the spell `cast` of a mob at `at` opens at `now_ms`: on the mob, or with
@@ -448,8 +447,7 @@ impl SimWorld {
         else {
             return None;
         };
-        let half = area.yaw / 2.0;
-        let rotation = Rotation::of_quaternion([0.0, 0.0, half.sin(), half.cos()]);
+        let rotation = yaw_rotation(area.yaw);
         let spell_state = SpellState {
             spell: Some(spell),
             start: Some(start),
@@ -749,22 +747,7 @@ impl SimWorld {
         (table, row): (&str, &str),
         now_ms: u64,
     ) -> Option<AttackOutcome> {
-        let intent = MobAttackIntent {
-            mob: area.source,
-            target,
-            target_at: area.centre,
-            mob_move: None,
-            strike: Some(Strike {
-                table: table.to_owned(),
-                row: row.to_owned(),
-                weapon: None,
-                reach: AREA_REACH,
-                ranged: None,
-            }),
-        };
-        let defender = self.player_by_number(target);
-        let (amount, style, _) = self.mob_intent_hit(&intent, None, defender)?;
-        self.land_mob_hit(target, area.source, amount, style, now_ms)
+        self.mob_area_hit(area.source, (target, area.centre), (table, row), now_ms)
     }
 
     /// The hits of the mobs' spell areas on players since the last call.

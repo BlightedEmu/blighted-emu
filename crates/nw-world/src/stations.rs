@@ -19,7 +19,7 @@ use crate::records::Position;
 pub(crate) const BUILDABLE_CONTROLLER: [u8; UUID_LEN] =
     uuid(0x359f_8468_0483_46ee_b1d4_beb7_5c10_48fd);
 /// The ownership component: `m_initialPermissionRule`, `m_initialStructureName`.
-pub(crate) const OWNERSHIP: [u8; UUID_LEN] = uuid(0x2a33_3c23_a549_bc11_1a9a_ae90_5170_f2f6);
+pub const OWNERSHIP: [u8; UUID_LEN] = uuid(0x2a33_3c23_a549_bc11_1a9a_ae90_5170_f2f6);
 /// The crafting station component: `m_craftingStationReference.m_craftingStationEntry`.
 const CRAFTING_STATION: [u8; UUID_LEN] = uuid(0x5200_15fd_2674_49e1_b862_e737_1ae6_0043);
 /// The interact name component: `m_name`, the name the station's interaction answer carries.

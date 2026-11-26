@@ -20,6 +20,7 @@ use std::sync::Arc;
 use bevy_ecs::entity::Entity;
 use nw_bus::{ConnectionRef, PlayerAbilityCooldown};
 use nw_content::attribute_bonuses::AbilityStats;
+use nw_content::character_points::FOCUS;
 use nw_content::combat::CombatData;
 use nw_content::player_abilities::{
     AbilityList, FragmentRow, FragmentTransition, ListAction, SpellProjectile, SpellRow,
@@ -113,6 +114,8 @@ const MAIN_HAND_OPTIONS: [(&str, u32); 3] = [
 
 /// Status effects an ability puts on a player are of this potency (the data's own).
 const OWN_EFFECT_POTENCY: f64 = 1.0;
+/// The multiple of a heal that its healer does not scale.
+const PLAIN_HEAL_SCALING: f64 = 1.0;
 /// `TargetTypes` that take enemies, and those that take friends.
 pub(super) const ENEMY_TARGETS: [&str; 2] = ["Enemy", "All"];
 pub(super) const FRIEND_TARGETS: [&str; 4] = ["Friend", SELF_TARGET, "Group", "All"];
@@ -2450,8 +2453,8 @@ impl SimWorld {
     /// holds 0.16 and Light's Embrace's 0.8, the shares of the weapon damage their tooltips
     /// name. The spell's damage row is not in it: the heal rows hold a coefficient of 0
     /// (`LifeStaff_SacredGround`, `LifeStaff_LightsEmbrace`, `LifeStaff_DivineEmbrace`), and
-    /// with it those heals gave nothing (live 2026-11-10). The effect's `UseHealScalingValue`
-    /// is not read (Unknown: what it changes).
+    /// with it those heals gave nothing (live 2026-11-10). An effect with `UseHealScalingValue`
+    /// takes it times its healer's scaling ([`SimWorld::healer_scaling`]).
     pub(super) fn spell_heal_base(&self, caster: Entity) -> f64 {
         self.held_weapon(caster).map_or_else(
             || self.combat.data.weapon().base_damage,
@@ -2473,7 +2476,9 @@ impl SimWorld {
     }
 
     /// Puts the spell `effects` of player `source`, whose spell hits for `hit_amount`, on player
-    /// `entity`; with `keep_held`, an effect it holds stays as it is.
+    /// `entity`; with `keep_held`, an effect it holds stays as it is. An effect that scales with
+    /// its healer (`UseHealScalingValue`) takes `hit_amount` times the healer's scaling
+    /// ([`SimWorld::healer_scaling`]).
     pub(super) fn spell_effects_on_player(
         &mut self,
         entity: Entity,
@@ -2484,16 +2489,52 @@ impl SimWorld {
         let content = Arc::clone(&self.content);
         let rules = &content.status_effects;
         let server_ms = self.server_ms;
+        let scaled_amount = hit_amount * self.healer_scaling(source);
         if let Some(mut player) = self.world.get_mut::<Player>(entity) {
             for effect in effects {
                 if keep_held && holds_effect(&player.status_effects, rules, effect) {
                     continue;
                 }
+                let amount = if rules
+                    .by_id(effect)
+                    .is_some_and(|rule| rule.scales_with_healer)
+                {
+                    scaled_amount
+                } else {
+                    hit_amount
+                };
                 player
                     .status_effects
-                    .add_spell_effect(rules, effect, source, hit_amount, server_ms);
+                    .add_spell_effect(rules, effect, source, amount, server_ms);
             }
         }
+    }
+
+    /// The multiple of the heals of player `healer` whose effect scales with the healer
+    /// (`UseHealScalingValue`): its level and Focus
+    /// ([`nw_content::attribute_damage::AttributeDamage::heal_scaling`]) times its outgoing heal
+    /// mods ([`StatusEffects::outgoing_heal_scale`]). A mob, or a player not here, heals by the
+    /// plain base.
+    pub(super) fn healer_scaling(&mut self, healer: u64) -> f64 {
+        let Some(entity) = self.player_by_number(healer) else {
+            return PLAIN_HEAL_SCALING;
+        };
+        let Some((level, values)) = self.level_and_attributes(entity) else {
+            return PLAIN_HEAL_SCALING;
+        };
+        let focus = values
+            .get(usize::try_from(FOCUS).unwrap_or(usize::MAX))
+            .copied()
+            .unwrap_or_default();
+        let outgoing = self
+            .world
+            .get::<Player>(entity)
+            .map_or(PLAIN_HEAL_SCALING, |player| {
+                player
+                    .status_effects
+                    .outgoing_heal_scale(&self.content.status_effects)
+            });
+        self.content.attribute_damage.heal_scaling(level, focus) * outgoing
     }
 
     /// Puts the spell `effects` of player `source` on mob `mob` of this sim (a mob of another
@@ -4161,6 +4202,225 @@ mod tests {
     fn the_heal_base_of_a_spell_is_the_casters_weapon_damage() {
         let (world, caster) = spell_fight(&[]);
         assert!((world.spell_heal_base(caster) - TEST_SWORD_DAMAGE).abs() < f64::EPSILON);
+    }
+
+    /// The healer and the healed of [`healed_in_a_second`].
+    const HEALER: u64 = 1;
+    /// `Status_Ability_Lifestaff_SacredGround`: `HealthModifierDamageBased` 0.16, `TickRate` 1,
+    /// `UseHealScalingValue`.
+    const SACRED_GROUND: &str = "Status_Ability_Lifestaff_SacredGround";
+    const SACRED_GROUND_SHARE: f64 = 0.16;
+    /// `Celestial_Heal_Self`: a heal without `UseHealScalingValue` (share 0.24).
+    const PLAIN_HEAL: &str = "Celestial_Heal_Self";
+    const PLAIN_HEAL_SHARE: f64 = 0.24;
+    /// `Status_Ability_Lifestaff_SacredGround_Upgrade2`: `NonConsumableHealMod` 0.5.
+    const UPGRADE_2: &str = "Status_Ability_Lifestaff_SacredGround_Upgrade2";
+    /// `LifeStaff_IncreasedHealing_Passive`: `NonConsumableHealMod` 0.1.
+    const STAFF_PASSIVE: &str = "LifeStaff_IncreasedHealing_Passive";
+    /// `ATB_Foc_Bonus_250_1_Effect`: `HealScalingValueMultiplier` 0.01, `StackMax` 15; retail
+    /// held 3 stacks from 717.507 s.
+    const FOCUS_250_BONUS: &str = "ATB_Foc_Bonus_250_1_Effect";
+    const FOCUS_250_STACKS: usize = 3;
+    /// `Status_StatSwap_OutgoingHealing`: `HealScalingValueMultiplier` 0.01; the perk's
+    /// `ScalingPerGearScore` `0,600:0.008,726:0.00` gives potency 1.2 at gear score 625.
+    const OUTGOING_HEALING: &str = "Status_StatSwap_OutgoingHealing";
+    const OUTGOING_HEALING_POTENCY: f64 = 1.2;
+    /// `LifeStaffT5`: `BaseDamage`.
+    const LIFE_STAFF_DAMAGE: f64 = 55.0;
+    /// The gear score of retail's `2hStaffLife_ConquerorsMercyT5_V2` (`general-other-01`, the
+    /// own paperdoll at 1792964398337).
+    const RETAIL_STAFF_GEAR_SCORE: u32 = 625;
+    /// `javelindata_attributefocus`: `ScalingValue` at Focus 5 and 250.
+    const FOCUS_HEAL_AT_5: f64 = 0.0;
+    const FOCUS_HEAL_AT_250: f64 = 5.619;
+    const BASE_ATTRIBUTE: i64 = 5;
+    const MAX_ATTRIBUTE: i64 = 500;
+    /// The experience between two levels of the test progression.
+    const LEVEL_STEP: u32 = 10;
+    const LEVELS: u32 = 65;
+    /// The health the player starts the heal with: two ticks fit below its max.
+    const LEFT_HEALTH: u32 = 1;
+    /// The heal's ticks run one a second (`TickRate` 1).
+    const HEAL_TICK_MS: u64 = 1_000;
+    const HEAL_TICK_S: f64 = 1.0;
+    /// The server time of the cast.
+    const HEAL_START_MS: u64 = 1_000;
+    /// `NonConsumableHealMod` of [`UPGRADE_2`] and of [`STAFF_PASSIVE`].
+    const UPGRADE_2_HEAL_MOD: f64 = 0.5;
+    const STAFF_PASSIVE_HEAL_MOD: f64 = 0.1;
+    /// `HealScalingValueMultiplier` of [`FOCUS_250_BONUS`] and of [`OUTGOING_HEALING`].
+    const OUTGOING_HEAL_MOD: f64 = 0.01;
+    /// `StackMax` of [`FOCUS_250_BONUS`].
+    const FOCUS_250_STACK_MAX: i64 = 15;
+    /// The Focus values of the `ScalingValue` rows.
+    const BASE_FOCUS: u32 = 5;
+    const RETAIL_FOCUS: u32 = 250;
+    /// The VM player of 2026-11-26 01:46: level 22, its staff at gear score 800 (heal base
+    /// 209.497 in the sim log).
+    const VM_LEVEL: u32 = 22;
+    const VM_STAFF_GEAR_SCORE: u32 = 800;
+
+    /// The health player [`HEALER`] at `level` with `focus` Focus gets in one second from the
+    /// spell `effect` it cast on itself with the heal base `heal_base`, while it holds `held`
+    /// (id, potency, applications).
+    fn healed_in_a_second(
+        level: u32,
+        focus: u32,
+        heal_base: f64,
+        effect: &str,
+        held: &[(&str, f64, usize)],
+    ) -> u32 {
+        use nw_content::attribute_damage::AttributeDamage;
+        use nw_content::character_points::{ATTRIBUTE_NAMES, CharacterPoints, PointRow};
+        use nw_content::progression::Progression;
+
+        use crate::world::Vitals;
+        use crate::world::tests::world;
+
+        let row = |id: &str| EffectSourceRow {
+            status_id: id.to_owned(),
+            ..EffectSourceRow::default()
+        };
+        let heal = |id: &str, share: f64, scales_with_healer: bool| EffectSourceRow {
+            base_duration_s: Some(GROUND_EFFECT_S),
+            tick_s: Some(HEAL_TICK_S),
+            hit_share: Some(share),
+            scales_with_healer,
+            ..row(id)
+        };
+        let mut world = world();
+        {
+            let content = Arc::make_mut(&mut world.content);
+            content.status_effects = StatusEffectRules::build(StatusEffectSource {
+                effects: vec![
+                    heal(SACRED_GROUND, SACRED_GROUND_SHARE, true),
+                    heal(PLAIN_HEAL, PLAIN_HEAL_SHARE, false),
+                    EffectSourceRow {
+                        non_consumable_heal_mod: Some(UPGRADE_2_HEAL_MOD),
+                        ..row(UPGRADE_2)
+                    },
+                    EffectSourceRow {
+                        non_consumable_heal_mod: Some(STAFF_PASSIVE_HEAL_MOD),
+                        ..row(STAFF_PASSIVE)
+                    },
+                    EffectSourceRow {
+                        outgoing_heal_mod: Some(OUTGOING_HEAL_MOD),
+                        stack_max: Some(FOCUS_250_STACK_MAX),
+                        ..row(FOCUS_250_BONUS)
+                    },
+                    EffectSourceRow {
+                        outgoing_heal_mod: Some(OUTGOING_HEAL_MOD),
+                        ..row(OUTGOING_HEALING)
+                    },
+                ],
+                ..StatusEffectSource::default()
+            });
+            let focus = usize::try_from(FOCUS).expect("index");
+            content.attribute_damage = AttributeDamage::new([]).with_heal_values([
+                (focus, BASE_FOCUS, FOCUS_HEAL_AT_5),
+                (focus, RETAIL_FOCUS, FOCUS_HEAL_AT_250),
+            ]);
+            content.progression = Progression::build(
+                (0..LEVELS).map(|level| (i64::from(level), i64::from(level * LEVEL_STEP))),
+                [],
+                [],
+            );
+            content.progression.points = CharacterPoints::build(
+                Vec::new(),
+                ATTRIBUTE_NAMES
+                    .iter()
+                    .flat_map(|name| [(*name, BASE_ATTRIBUTE), (*name, MAX_ATTRIBUTE)])
+                    .collect::<Vec<_>>(),
+                [],
+                [],
+                [],
+                std::iter::empty::<PointRow<'_>>(),
+            );
+        }
+        join(&mut world, HEALER, 0.0);
+        let entity = world.player_by_number(HEALER).expect("player");
+        let base = u32::try_from(BASE_ATTRIBUTE).expect("base");
+        {
+            let rules = Arc::clone(&world.content);
+            let mut player = world.world.get_mut::<Player>(entity).expect("player");
+            player.experience = (level - 1) * LEVEL_STEP;
+            player.attributes = Attributes::of(&[(FOCUS, focus - base)], 0);
+            for (id, potency, applications) in held {
+                for _ in 0..*applications {
+                    assert!(player.status_effects.add_by_id(
+                        &rules.status_effects,
+                        id,
+                        *potency,
+                        HEALER,
+                        HEAL_START_MS
+                    ));
+                }
+            }
+        }
+        let start = {
+            let mut vitals = world.world.get_mut::<Vitals>(entity).expect("vitals");
+            let hurt = vitals.health.max() - LEFT_HEALTH;
+            vitals.health.take(hurt);
+            vitals.health.current()
+        };
+        world.server_ms = HEAL_START_MS;
+        world.spell_effects_on_player(entity, &[effect.to_owned()], (HEALER, heal_base), false);
+        let health = |world: &mut SimWorld, at_ms: u64| {
+            world.server_ms = at_ms;
+            world.tick_status_effects(NOW);
+            world
+                .world
+                .get::<Vitals>(entity)
+                .expect("vitals")
+                .health
+                .current()
+        };
+        let first = health(&mut world, HEAL_START_MS);
+        assert!(first > start, "the first tick heals at once");
+        health(&mut world, HEAL_START_MS + HEAL_TICK_MS) - first
+    }
+
+    /// Retail `general-other-01` from 727.537 s: the own player (level 65, Focus 250, the
+    /// gear score 625 life staff, Sacred Ground's `Upgrade2` and the staff passive held, 3
+    /// stacks of the Focus 250 bonus and the staff's outgoing healing perk) healed 356.69 a
+    /// second in its own Sacred Ground (727.203 to 728.172 s and 729.205 to 730.188 s). The rule
+    /// gives 354.0, 0.75 % short (Unknown: the rest); before, the heal took the weapon damage
+    /// alone and gave 33.5 a second to a level 22 player.
+    #[test]
+    fn a_heal_that_scales_with_its_healer_takes_its_level_focus_and_heal_mods() {
+        /// Retail's heal a second.
+        const RETAIL_HEAL: f64 = 356.69;
+        /// What the rule gives for it, and how far from retail the test lets it be.
+        const RULE_HEAL: u32 = 354;
+        const RETAIL_GAP: f64 = 0.01;
+        let staff = LIFE_STAFF_DAMAGE * weapon_damage_scale(RETAIL_STAFF_GEAR_SCORE);
+        let retail = healed_in_a_second(
+            LEVELS,
+            RETAIL_FOCUS,
+            staff,
+            SACRED_GROUND,
+            &[
+                (UPGRADE_2, OWN_EFFECT_POTENCY, 1),
+                (STAFF_PASSIVE, OWN_EFFECT_POTENCY, 1),
+                (FOCUS_250_BONUS, OWN_EFFECT_POTENCY, FOCUS_250_STACKS),
+                (OUTGOING_HEALING, OUTGOING_HEALING_POTENCY, 1),
+            ],
+        );
+        assert!(retail.abs_diff(RULE_HEAL) <= 1, "{retail}");
+        assert!((f64::from(retail) / RETAIL_HEAL - 1.0).abs() < RETAIL_GAP);
+        // The VM player at Focus 5: 0.16 x 209.5 x 1.525.
+        const LEVEL_22_HEAL: u32 = 51;
+        let staff_800 = LIFE_STAFF_DAMAGE * weapon_damage_scale(VM_STAFF_GEAR_SCORE);
+        assert_eq!(
+            healed_in_a_second(VM_LEVEL, BASE_FOCUS, staff_800, SACRED_GROUND, &[]),
+            LEVEL_22_HEAL
+        );
+        // A heal without `UseHealScalingValue` keeps the plain base: 0.24 x 209.5.
+        const PLAIN_HEAL_AMOUNT: u32 = 50;
+        assert_eq!(
+            healed_in_a_second(VM_LEVEL, BASE_FOCUS, staff_800, PLAIN_HEAL, &[]),
+            PLAIN_HEAL_AMOUNT
+        );
     }
 
     /// `general-other-01` at 79.810 s: no aim point, the camera 4.70 m over the floor, the

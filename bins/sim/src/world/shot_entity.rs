@@ -14,6 +14,10 @@
 //! point, the solid's level entity (none for a solid of no entity) and the collided flag, with no
 //! hit volume (Observed: `opr_que_and_lost`, 940 states on the OPR Vertical outer perimeter wall).
 //!
+//! A mob's projectile is the same entity ([`super::mob_shot`]), its states on its slice's own
+//! components; the slice it spawns where it hits is an entity of its own
+//! ([`SimWorld::spawn_impact_entity`]).
+//!
 //! Unknown: the clock of the time anchor (the server time of the shot is sent); the weapon
 //! effect of a weapon with a gem (the default effect is sent).
 
@@ -41,7 +45,7 @@ const SHOT_ENTITY_NAMESPACE: u64 = 0x7368_6f74_656e_7479;
 const TIME_ANCHOR_MS: u64 = 66;
 /// How long after its end (a hit, or the end of its flight) the entity leaves the views
 /// (Observed: the slice's lifetime plus 1.0 s in every slice).
-const AFTER_END_MS: u64 = 1_000;
+pub(super) const AFTER_END_MS: u64 = 1_000;
 /// The hit volume a hit on a player or a mob names (`collidedWithHitVolumeIndex`, and the
 /// 2720 result byte of a turret shot). The sim does not know the target's hit volumes, so it
 /// sends retail's most common value (Observed: 0 in 21,158 of the 65,265 first hits of player
@@ -76,7 +80,7 @@ pub(super) struct ProjectileSpawn {
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(super) struct LiveShot {
     /// Its slot key.
-    number: u64,
+    pub(super) number: u64,
     /// The component of its projectile state.
     component: u64,
     /// When its time anchor goes out, and the anchor; `None` once it went.
@@ -125,6 +129,7 @@ fn merge_state(members: &mut [BundleMember], change: ProjectileState) {
             *state = ProjectileState {
                 position: change.position.or(state.position),
                 velocity: change.velocity.or(state.velocity),
+                gravity_override: change.gravity_override.or(state.gravity_override),
                 time_anchor_us: change.time_anchor_us.or(state.time_anchor_us),
                 collided_with: change.collided_with.or(state.collided_with),
                 hit_volume: change.hit_volume.or(state.hit_volume),
@@ -184,6 +189,17 @@ impl SimWorld {
         spawn: ProjectileSpawn,
         now_ms: u64,
     ) -> Option<(u64, [u8; RAW_ID_LEN])> {
+        self.spawn_projectile_with(spawn, Vec::new(), now_ms)
+    }
+
+    /// [`SimWorld::spawn_projectile`] with the other states of its slice, `others` (a mob
+    /// projectile's ownership, [`super::mob_shot`]).
+    pub(super) fn spawn_projectile_with(
+        &mut self,
+        spawn: ProjectileSpawn,
+        others: Vec<BundleMember>,
+        now_ms: u64,
+    ) -> Option<(u64, [u8; RAW_ID_LEN])> {
         let muzzle = spawn.muzzle;
         let start = WorldPosition::from_metres(muzzle.x, muzzle.y, muzzle.z)?;
         let state = ProjectileState {
@@ -216,6 +232,9 @@ impl SimWorld {
                     }),
                 });
             }
+            // Retail: the members in component order (the grenadier bomb's ownership on 1
+            // before its projectile state on 2, newchar-retail-2026-09-18 802.637 s).
+            members.extend(others);
             members.push(state_member(spawn.component, state));
             Station {
                 gde_ref,
@@ -238,6 +257,49 @@ impl SimWorld {
                 .saturating_add(AFTER_END_MS),
         });
         Some((number, made))
+    }
+
+    /// Spawns the entity of the slice of asset `asset` that a projectile spawns where it hits, with
+    /// its states `members`, at `at` at `now_ms`, for `lasting_ms`; gives its slot key. It has
+    /// no projectile state: its time anchor never goes and it takes no hit.
+    pub(super) fn spawn_impact_entity(
+        &mut self,
+        asset: [u8; ASSET_ID_LEN],
+        mut members: Vec<BundleMember>,
+        at: Position,
+        (lasting_ms, now_ms): (u64, u64),
+    ) -> u64 {
+        let namespace = SHOT_ENTITY_NAMESPACE ^ self.me.generation;
+        let number = self.stations.place_camp(|number| {
+            // A slot key is far below `usize::MAX` on the 64-bit targets the server runs on.
+            let gde_ref = dynamic_ref(namespace, number as usize);
+            members.push(BundleMember {
+                component: CARD_COMPONENT,
+                state: MemberState::GdeMetadata(GdeMetadataReplicatedState {
+                    asset: Some(AssetId {
+                        id: asset,
+                        sub_id: DYNAMIC_SLICE_SUB_ID,
+                    }),
+                    gde_ref: Some(gde_ref),
+                }),
+            });
+            members.sort_by_key(|member| member.component);
+            Station {
+                gde_ref,
+                position: at,
+                station_type: String::new(),
+                name: Vec::new(),
+                members,
+            }
+        });
+        self.live_shots.push(LiveShot {
+            number,
+            component: CARD_COMPONENT,
+            anchor: None,
+            stuck_ms: 0,
+            until_ms: now_ms.saturating_add(lasting_ms),
+        });
+        number
     }
 
     /// The shot entity of slot key `number` hit the entity `target` (a mob's or a player's

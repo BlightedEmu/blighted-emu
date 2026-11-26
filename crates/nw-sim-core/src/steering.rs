@@ -7,7 +7,8 @@
 //! Unknown), so a mob moves on the straight line to its goal (Inferred: the trees' moves are
 //! short, a few to tens of metres) and the caller checks the ground on that line. Facing: a
 //! moving mob turns toward where it moves at the turn rate (`FacingMode` 0, `Movement`); a
-//! strafing mob faces its target.
+//! strafing mob turns to face its target by its node's `FacingConvergenceRate`
+//! ([`StrafeFacing`]).
 
 use std::f32::consts::{PI, TAU};
 
@@ -32,6 +33,40 @@ pub fn yaw_gap(from: f32, to: f32) -> f32 {
 /// Yaw `from` turned toward `to` by at most `max_rad`.
 pub fn turn_toward(from: f32, to: f32, max_rad: f32) -> f32 {
     from + yaw_gap(from, to).clamp(-max_rad, max_rad)
+}
+
+/// How a strafing mob turns to face its target.
+///
+/// Inferred (2026-11-26, retail strafes): `FacingConvergenceRate` is the time constant, in
+/// seconds, of the yaw's first-order lag to the direction of the target: each step of `dt`
+/// closes the share `1 - e^(-dt / rate)` of the gap. Every strafe node of the AI data holds
+/// 0.25 (1,881 node uses of 986 slices), and so do the slices' strafe configs
+/// (`m_facingConvergenceRate`). Followed over the 7,942 retail `Strafe` states within 8 m of the
+/// own player of 13 ledgers (`newchar-retail-2026-09-18`, `Playthrough_Part_01` and `_02`, the
+/// ten `01-starting-zone` quests), each seeded with the retail yaw at its first state, this lag
+/// at 0.25 s gives a gap to the player of p50 2.3, p90 14.4 and p99 51.4 degrees against
+/// retail's 2.3, 13.7 and 49.5. Read as other units, 0.25 does not: a share of 0.25 per 1/30 s
+/// gives p90 7.3, a share per second p90 40.0; the configs' turn caps of 45 and 90 degrees per
+/// second give p99 105.9 and 91.3.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum StrafeFacing {
+    /// The lag with this time constant (seconds).
+    Converge {
+        /// `FacingConvergenceRate`.
+        time_s: f32,
+    },
+    /// At most the steering's turn rate, for a strafe whose data gives no convergence rate.
+    TurnRate,
+}
+
+impl StrafeFacing {
+    /// Yaw `from` turned toward `to` over `dt_s` with `steering`.
+    fn turn(self, from: f32, to: f32, steering: &Steering, dt_s: f32) -> f32 {
+        match self {
+            Self::Converge { time_s } => from + yaw_gap(from, to) * (1.0 - (-dt_s / time_s).exp()),
+            Self::TurnRate => turn_toward(from, to, steering.turn_rate_deg_s.to_radians() * dt_s),
+        }
+    }
 }
 
 /// How a mob moves (a navigation config, or a node's own fields).
@@ -108,13 +143,13 @@ impl Mover {
 
     /// Strafes `dt_s` around `target` with `steering`: sideways (`left` on its left, else on its
     /// right), and toward or away from it while it is outside the band `ideal_m` (min, max);
-    /// it faces the target.
+    /// it turns to face the target by `facing`.
     pub fn strafe_around(
         &mut self,
         target: Position,
         ideal_m: (f32, f32),
         left: bool,
-        steering: &Steering,
+        (steering, facing): (&Steering, StrafeFacing),
         dt_s: f32,
     ) {
         let distance = self.position.horizontal_distance(target);
@@ -138,12 +173,7 @@ impl Mover {
             self.position.x += dx / length * step_m;
             self.position.y += dy / length * step_m;
         }
-        let facing = yaw_toward(self.position, target);
-        self.yaw = turn_toward(
-            self.yaw,
-            facing,
-            steering.turn_rate_deg_s.to_radians() * dt_s,
-        );
+        self.yaw = facing.turn(self.yaw, yaw_toward(self.position, target), steering, dt_s);
     }
 }
 
@@ -247,11 +277,23 @@ mod tests {
             speed_mps: 0.0,
         };
         for _ in 0..SIDE_TICKS {
-            mover.strafe_around(target, (3.0, 5.0), true, &RUN, DT_S);
+            mover.strafe_around(
+                target,
+                (3.0, 5.0),
+                true,
+                (&RUN, StrafeFacing::TurnRate),
+                DT_S,
+            );
         }
         assert!(mover.position.x < START.x, "on its left: west of the start");
         for _ in SIDE_TICKS..AROUND_TICKS {
-            mover.strafe_around(target, (3.0, 5.0), true, &RUN, DT_S);
+            mover.strafe_around(
+                target,
+                (3.0, 5.0),
+                true,
+                (&RUN, StrafeFacing::TurnRate),
+                DT_S,
+            );
         }
         let distance = mover.position.horizontal_distance(target);
         assert!(
@@ -260,5 +302,82 @@ mod tests {
         );
         let facing = yaw_toward(mover.position, target);
         assert!(yaw_gap(mover.yaw, facing).abs() < 0.3, "faces the target");
+    }
+
+    /// How far from a strafing mob a target circles it, and how fast.
+    const CIRCLE_RADIUS_M: f32 = 2.5;
+    const CIRCLE_SPEED_MPS: f32 = 5.0;
+
+    /// The largest gap from a strafing mob's facing to a target that circles it at
+    /// [`CIRCLE_SPEED_MPS`] at [`CIRCLE_RADIUS_M`], after the first second, facing by `facing`
+    /// with the first mate's `Strafe` config (1.25 m/s, 45 degrees per second).
+    fn largest_gap_to_a_circling_target(facing: StrafeFacing) -> f32 {
+        const SETTLE_TICKS: usize = 30;
+        const TICKS: usize = 300;
+        const STRAFE: Steering = Steering {
+            max_speed_mps: 1.25,
+            min_speed_mps: 0.75,
+            acceleration_mps2: 30.0,
+            deceleration_mps2: 30.0,
+            turn_rate_deg_s: 45.0,
+            arrival_m: 0.2,
+        };
+        let mut mover = Mover {
+            position: START,
+            yaw: 0.0,
+            speed_mps: 0.0,
+        };
+        let mut largest: f32 = 0.0;
+        for tick in 1..=TICKS {
+            #[allow(clippy::cast_precision_loss, reason = "a few hundred ticks")]
+            let angle = CIRCLE_SPEED_MPS / CIRCLE_RADIUS_M * DT_S * tick as f32;
+            let target = Position {
+                x: mover.position.x - CIRCLE_RADIUS_M * angle.sin(),
+                y: mover.position.y + CIRCLE_RADIUS_M * angle.cos(),
+                z: START.z,
+            };
+            mover.strafe_around(target, (2.0, 2.5), true, (&STRAFE, facing), DT_S);
+            if tick > SETTLE_TICKS {
+                largest = largest.max(yaw_gap(mover.yaw, yaw_toward(mover.position, target)).abs());
+            }
+        }
+        largest
+    }
+
+    #[test]
+    fn a_strafe_keeps_a_circling_target_at_the_lag_of_its_convergence_rate() {
+        // `FacingConvergenceRate` 0.25 s, the value of every strafe node ([`StrafeFacing`]).
+        const TIME_S: f32 = 0.25;
+        /// How near the steady lag the gap stays: the mob's own step within a tick moves its
+        /// aim a little.
+        const LAG_MARGIN_RAD: f32 = 0.02;
+        const LOST_RAD: f32 = PI / 2.0;
+        // The steady lag of a first-order lag behind a direction that turns `step` per tick:
+        // the gap `g` before a tick's turn is `step + g * kept` with `kept = e^(-dt / time)`.
+        let step = CIRCLE_SPEED_MPS / CIRCLE_RADIUS_M * DT_S;
+        let kept = (-DT_S / TIME_S).exp();
+        let steady = step * kept / (1.0 - kept);
+        let converging =
+            largest_gap_to_a_circling_target(StrafeFacing::Converge { time_s: TIME_S });
+        assert!(
+            converging <= steady + LAG_MARGIN_RAD,
+            "{converging} > {steady}"
+        );
+        let capped = largest_gap_to_a_circling_target(StrafeFacing::TurnRate);
+        assert!(
+            capped > LOST_RAD,
+            "45 degrees per second loses the target: {capped}"
+        );
+    }
+
+    #[test]
+    fn a_converging_strafe_closes_its_share_of_the_gap_each_step() {
+        const TIME_S: f32 = 0.25;
+        let facing = StrafeFacing::Converge { time_s: TIME_S };
+        let turned = facing.turn(0.0, 1.0, &RUN, DT_S);
+        assert!(
+            (turned - (1.0 - (-DT_S / TIME_S).exp())).abs() < CLOSE,
+            "{turned}"
+        );
     }
 }

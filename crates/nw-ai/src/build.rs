@@ -143,6 +143,7 @@ impl Build {
                 frag_tags: Vec::new(),
                 length,
                 windows,
+                root_motion: None,
             }],
             weapon_variants: Vec::new(),
             activation: None,

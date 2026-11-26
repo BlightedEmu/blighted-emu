@@ -47,8 +47,8 @@ use crate::error::ToolError;
 use crate::melee_shapes::{
     ANIMATION_LIST_SUFFIX, Bodies, CLIP_SUFFIX, ClipContext, DEFINITION_SUFFIX, EQUIP_TYPES,
     MS_PER_SECOND, PLAYER_ANIMATION_LIST, PLAYER_ANIMATION_LIST_FOLDER, PLAYER_DEFINITION,
-    PLAYER_SKELETON, WeaponBody, clip_folders, equip_attachments, melee_shape, ms, normalized,
-    root_path,
+    PLAYER_SKELETON, RootPath, WeaponBody, clip_folders, equip_attachments, melee_shape, ms,
+    normalized, root_path,
 };
 use crate::source::GameSource;
 
@@ -126,7 +126,8 @@ const PLAYER_REACTION_TABLE: &str =
     "sharedassets/springboardentitites/playerdata/cage/playerreactiontableharness.actionlist";
 /// The separator of a reaction entry's animation names ([`ReactionEntry::animations`]).
 const ANIMATION_SEPARATOR: &str = "+";
-/// A root path that moves less than this, m, is no motion ([`ReactionEntry::motion`]).
+/// A root path that moves less than this, m, is no motion ([`ReactionEntry::motion`],
+/// [`root_motion`]).
 const STILL_ROOT_M: f32 = 0.001;
 const INVULNERABILITY_CLIP: &str = "Invulnerability";
 const USE_CLIP: &str = "UsePaperdollItem";
@@ -300,8 +301,23 @@ enum ClipPlay {
     When(Condition),
 }
 
-/// The ranged attack database in `root`: (profile, attack) to (range, radius, hit scan).
-pub fn ranged_attacks(root: &Element) -> HashMap<(String, String), (f32, f32, bool)> {
+/// An attack of the ranged attack database: its flat index over all profiles in stream order
+/// (the projectile state's `rangedAttackIndex`; Observed by the capture tool `radbindex`), its
+/// profile, its name and its data element.
+pub struct RangedAttackEntry<'a> {
+    /// The flat index.
+    pub index: u64,
+    /// The profile.
+    pub profile: String,
+    /// The attack name.
+    pub attack: String,
+    /// The attack's data (`value2`).
+    pub data: &'a Element,
+}
+
+/// The attacks of the ranged attack database in `root`, in stream order. The index counts every
+/// attack of every profile; an attack without a profile name, a name or data is left out.
+pub fn ranged_attack_entries(root: &Element) -> Vec<RangedAttackEntry<'_>> {
     let crc = lowercase_crc32;
     let string = |element: &Element, field: &str| {
         element
@@ -309,39 +325,50 @@ pub fn ranged_attacks(root: &Element) -> HashMap<(String, String), (f32, f32, bo
             .and_then(|value| value.as_string().ok())
             .map(str::to_owned)
     };
-    let mut found = HashMap::new();
     let Some(profiles) = root.child(crc(PROFILES_FIELD)) else {
-        return found;
+        return Vec::new();
     };
-    for profile in &profiles.children {
-        let Some(name) = string(profile, KEY_FIELD) else {
-            continue;
-        };
-        let Some(attacks) = profile
+    let attacks = profiles.children.iter().flat_map(|profile| {
+        let name = string(profile, KEY_FIELD);
+        profile
             .child(crc(VALUE_FIELD))
             .and_then(|value| value.child(crc(ATTACKS_FIELD)))
-        else {
-            continue;
-        };
-        for attack in &attacks.children {
-            let Some(attack_name) = string(attack, KEY_FIELD) else {
-                continue;
-            };
-            let Some(data) = attack.child(crc(VALUE_FIELD)) else {
-                continue;
-            };
-            let float = |field: &str| data.child(crc(field)).and_then(|v| v.as_f32().ok());
-            let hit_scan = data
+            .into_iter()
+            .flat_map(|attacks| &attacks.children)
+            .map(move |attack| (name.clone(), attack))
+    });
+    (0_u64..)
+        .zip(attacks)
+        .filter_map(|(index, (profile, attack))| {
+            Some(RangedAttackEntry {
+                index,
+                profile: profile?,
+                attack: string(attack, KEY_FIELD)?,
+                data: attack.child(crc(VALUE_FIELD))?,
+            })
+        })
+        .collect()
+}
+
+/// The ranged attack database in `root`: (profile, attack) to (range, radius, hit scan).
+pub fn ranged_attacks(root: &Element) -> HashMap<(String, String), (f32, f32, bool)> {
+    let crc = lowercase_crc32;
+    ranged_attack_entries(root)
+        .into_iter()
+        .filter_map(|entry| {
+            let float = |field: &str| entry.data.child(crc(field)).and_then(|v| v.as_f32().ok());
+            let hit_scan = entry
+                .data
                 .child(crc(HIT_SCAN_FIELD))
                 .and_then(|value| value.as_bool().ok());
-            if let (Some(range), Some(radius), Some(hit_scan)) =
+            let (Some(range), Some(radius), Some(hit_scan)) =
                 (float(MAX_RANGE_FIELD), float(RADIUS_FIELD), hit_scan)
-            {
-                found.insert((name.clone(), attack_name), (range, radius, hit_scan));
-            }
-        }
-    }
-    found
+            else {
+                return None;
+            };
+            Some(((entry.profile, entry.attack), (range, radius, hit_scan)))
+        })
+        .collect()
 }
 
 fn find_field(element: &Element, crc: u32) -> Option<&Element> {
@@ -958,6 +985,28 @@ fn attack_motion(
     })
 }
 
+/// The motion of the root path `(step_s, path)` ([`root_path`]) with no multiplier and no kept
+/// velocity: its offsets, one per step; `None` for a path that never moves [`STILL_ROOT_M`] from
+/// its start.
+pub(crate) fn root_motion((step_s, path): (f64, RootPath)) -> Option<AttackMotion> {
+    if !path
+        .iter()
+        .any(|(_, offset)| offset[0].hypot(offset[1]) >= STILL_ROOT_M)
+    {
+        return None;
+    }
+    // A frame time is a few tens of milliseconds.
+    #[allow(clippy::cast_possible_truncation)]
+    let step_ms = (step_s * MS_PER_SECOND) as f32;
+    Some(AttackMotion {
+        step_ms,
+        offsets: path.into_iter().map(|(_, offset)| offset).collect(),
+        inherit_velocity: false,
+        inherit_max_mps: None,
+        decel_mps2: [0.0; 2],
+    })
+}
+
 /// The rows of the player reaction table, each with the entry of its fragment for a character
 /// with `tags` ([`HitReaction`]); an entry that cannot be built goes to `skipped` and leaves its
 /// row without one.
@@ -1020,22 +1069,7 @@ fn reaction_entry(
         .main_animation()
         .map(|clip| root_path(&sources.bodies, clip, length_s))
         .transpose()?
-        .filter(|(_, path)| {
-            path.iter()
-                .any(|(_, offset)| offset[0].hypot(offset[1]) >= STILL_ROOT_M)
-        })
-        .map(|(step_s, path)| {
-            // A frame time is a few tens of milliseconds.
-            #[allow(clippy::cast_possible_truncation)]
-            let step_ms = (step_s * MS_PER_SECOND) as f32;
-            AttackMotion {
-                step_ms,
-                offsets: path.into_iter().map(|(_, offset)| offset).collect(),
-                inherit_velocity: false,
-                inherit_max_mps: None,
-                decel_mps2: [0.0; 2],
-            }
-        });
+        .and_then(root_motion);
     Ok(ReactionEntry {
         animations: animations.join(ANIMATION_SEPARATOR),
         length_ms: ms(fragment_s),
@@ -2120,6 +2154,58 @@ mod tests {
             "the charge's release"
         );
         assert_eq!(of("").aimed, None, "no weapon aims");
+    }
+
+    #[test]
+    fn a_ranged_attack_index_counts_every_attack_of_every_profile_in_stream_order() {
+        let crc = lowercase_crc32;
+        let attack = |name: Option<&str>| {
+            let mut children = vec![Element::with_children(crc(VALUE_FIELD), Vec::new())];
+            children.extend(
+                name.map(|name| Element::with_value(crc(KEY_FIELD), name.as_bytes().to_vec())),
+            );
+            Element::with_children(0, children)
+        };
+        let profile = |name: &str, attacks: Vec<Element>| {
+            Element::with_children(
+                0,
+                vec![
+                    Element::with_value(crc(KEY_FIELD), name.as_bytes().to_vec()),
+                    Element::with_children(
+                        crc(VALUE_FIELD),
+                        vec![Element::with_children(crc(ATTACKS_FIELD), attacks)],
+                    ),
+                ],
+            )
+        };
+        let root = Element::with_children(
+            0,
+            vec![Element::with_children(
+                crc(PROFILES_FIELD),
+                vec![
+                    profile(
+                        "AI_Undead",
+                        vec![
+                            attack(Some("BreakoutGrenade")),
+                            attack(None),
+                            attack(Some("Grenadier_Bomb")),
+                        ],
+                    ),
+                    profile("AI_UndeadNaga", vec![attack(Some("FireballSpit"))]),
+                ],
+            )],
+        );
+        assert_eq!(
+            ranged_attack_entries(&root)
+                .iter()
+                .map(|entry| (entry.index, entry.profile.as_str(), entry.attack.as_str()))
+                .collect::<Vec<_>>(),
+            [
+                (0, "AI_Undead", "BreakoutGrenade"),
+                (2, "AI_Undead", "Grenadier_Bomb"),
+                (3, "AI_UndeadNaga", "FireballSpit"),
+            ]
+        );
     }
 
     #[test]

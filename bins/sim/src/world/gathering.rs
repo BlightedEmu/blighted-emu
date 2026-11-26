@@ -684,6 +684,14 @@ impl SimWorld {
         };
         let accept = gather_answer(number, request, GATHER_ACCEPTED, NO_NAME);
         send_now(&mut self.combat_messages, &player.connection, &[accept]);
+        // A tool gather holds its tool in the gather hand until it ends ([`Gear::hold_tool`]).
+        //
+        // [`Gear::hold_tool`]: super::gear::Gear::hold_tool
+        if tool_efficiency.is_some()
+            && let Some(gear) = player.gear.as_mut()
+        {
+            gear.hold_tool(tool_slot(&gatherable));
+        }
         // The gather plays its animation's sequence for the others
         // ([`PlayerSequences::gather`]).
         //
@@ -1051,6 +1059,17 @@ impl SimWorld {
             })
     }
 
+    /// The tool of the gather of player `number` that ended goes back to its slot from the gather
+    /// hand ([`super::gear::Gear::hold_tool`]).
+    fn tool_back_from_hand(&mut self, number: u64) {
+        if let Some(entity) = self.player_by_number(number)
+            && let Some(mut player) = self.world.get_mut::<Player>(entity)
+            && let Some(gear) = player.gear.as_mut()
+        {
+            gear.hold_tool(None);
+        }
+    }
+
     /// The item player `entity` wears in the tool slot of `gatherable`'s tradeskill.
     fn worn_tool(&self, entity: Entity, gatherable: &Gatherable) -> Option<&str> {
         let slot = tool_slot(gatherable)?;
@@ -1182,6 +1201,7 @@ impl SimWorld {
     /// `gather` ends at `now_ms`, after `ended_before` other gatherers of its group node ended
     /// in the same tick.
     fn end_gather(&mut self, gather: &OpenGather, ended_before: u32, now_ms: u64) {
+        self.tool_back_from_hand(gather.number);
         let content = std::sync::Arc::clone(&self.content);
         let mob_tags = gather
             .mob
@@ -1764,6 +1784,7 @@ impl SimWorld {
         let request = match running {
             Some(at) => {
                 let gather = self.open_gathers.remove(at);
+                self.tool_back_from_hand(number);
                 self.keep_work_left(&gather, now_ms);
                 if gather.mob.is_none() {
                     self.nodes.release(&gather.request.target, number);
@@ -3145,6 +3166,49 @@ pub(crate) mod tests {
             mining(&world, entity),
             64,
             "Gather_MiningT1 under a neutral multiplier"
+        );
+    }
+
+    /// A tool gather holds the pick in the gather hand (slot 9) until it ends, as retail's
+    /// skinning knife (`12-1_getoffbeach-Soul-Survivor`, 1790514489260 to 1790514576591; the
+    /// pick is Inferred); a stopped gather puts it back too.
+    #[test]
+    fn a_tool_gather_holds_its_tool_in_the_gather_hand_until_it_ends() {
+        use nw_messages::paperdoll::slot;
+        let (mut world, entity) = admitted();
+        let pick = world.content.kits.item(PICK).map(|item| item.item_index);
+        let in_hand = |world: &SimWorld| {
+            let player = world.world.get::<Player>(entity).expect("player");
+            let gear = player.gear.as_ref().expect("gear");
+            let shown = gear
+                .visible_items()
+                .iter()
+                .find(|worn| worn.slot == slot::GATHERABLE_HAND)
+                .and_then(|worn| worn.item)
+                .map(|item| item.item_index);
+            (shown, gear.hands().drawn)
+        };
+        assert_eq!(in_hand(&world), (None, None));
+        world.gather_open_world(entity, NUMBER, request(1, 0x11, VEIN), &[], NOW);
+        let end_ms = world.open_gathers.first().expect("a gather runs").end_ms;
+        assert_eq!(in_hand(&world), (pick, Some(slot::GATHERABLE_HAND)));
+        world.gathers_due(end_ms);
+        assert_eq!(in_hand(&world), (None, None), "back in its slot");
+        world.gather_open_world(entity, NUMBER, request(2, 0x12, VEIN), &[], end_ms);
+        assert_eq!(in_hand(&world), (pick, Some(slot::GATHERABLE_HAND)));
+        world.cancel_gather(entity, 2, end_ms + GATHER_TICK_MS);
+        assert_eq!(
+            in_hand(&world),
+            (None, None),
+            "a stopped gather puts it back"
+        );
+        let player = world.world.get::<Player>(entity).expect("player");
+        assert_eq!(
+            player
+                .gear
+                .as_ref()
+                .and_then(|gear| gear.worn_item(MINING_SLOT)),
+            Some(PICK)
         );
     }
 

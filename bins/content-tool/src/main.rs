@@ -1236,8 +1236,8 @@ fn print_ai_data(report: &AiDataReport, out: &Path) {
         report.unknown_fragments.len()
     );
     println!(
-        "ranged attacks: {}, projectile slices of the mob ranged clips: {}",
-        report.ranged_attacks, report.projectile_slices
+        "ranged attacks: {}, projectile slices of the mob ranged clips: {}, with an entity: {}",
+        report.ranged_attacks, report.projectile_slices, report.projectile_entities
     );
     println!("files not used: {}", report.skipped.len());
     for (file, reason) in report.skipped.iter().take(SHOWN_AI_GAPS) {

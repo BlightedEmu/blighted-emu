@@ -287,6 +287,9 @@ enum Phase {
 pub(super) enum FishingAction {
     /// Put the drawn weapon away: the pole comes out.
     PutWeaponAway,
+    /// The pole is in the gather hand (`true`, at `FishingEquipped`) or back in its slot
+    /// (`false`, at `FishingUnequipped`): [`super::gear::Gear::hold_tool`].
+    PoleInHand(bool),
     /// Work out the cast of a key held `hold_ms` and call [`PlayerFishing::cast`].
     Cast { hold_ms: u64 },
     /// The bobber landed: send 2444.
@@ -621,6 +624,7 @@ impl PlayerFishing {
             self.enter(FishingState::FishingEnded);
             self.enter(FishingState::FishingUnequipped);
             self.phase = Phase::Unequipped;
+            actions.push(FishingAction::PoleInHand(false));
         }
         actions
     }
@@ -632,6 +636,7 @@ impl PlayerFishing {
             Phase::Equipping { at_ms } if now_ms >= at_ms => {
                 self.enter(FishingState::FishingEquipped);
                 self.phase = Phase::Equipped;
+                actions.push(FishingAction::PoleInHand(true));
                 actions.push(FishingAction::QuestStep(FishingStep::Equip));
             }
             Phase::Flying { at_ms, cast } if now_ms >= at_ms => {
@@ -696,6 +701,7 @@ impl PlayerFishing {
                     self.enter(FishingState::FishingEnded);
                     self.enter(FishingState::FishingUnequipped);
                     self.phase = Phase::Unequipped;
+                    actions.push(FishingAction::PoleInHand(false));
                 } else {
                     self.end();
                 }
@@ -1118,6 +1124,13 @@ impl SimWorld {
                         && let Some(gear) = player.gear.as_mut()
                     {
                         gear.put_away(time_ns, None);
+                    }
+                }
+                FishingAction::PoleInHand(in_hand) => {
+                    if let Some(mut player) = self.world.get_mut::<Player>(entity)
+                        && let Some(gear) = player.gear.as_mut()
+                    {
+                        gear.hold_tool(in_hand.then_some(FISHING_SLOT));
                     }
                 }
                 FishingAction::Cast { hold_ms } => self.cast_line(entity, hold_ms, now_ms),
@@ -1610,7 +1623,10 @@ mod tests {
         );
         assert_eq!(
             fishing.tick(NOW + EQUIP_MS),
-            [FishingAction::QuestStep(FishingStep::Equip)]
+            [
+                FishingAction::PoleInHand(true),
+                FishingAction::QuestStep(FishingStep::Equip)
+            ]
         );
         assert_eq!(
             states(&fishing),
@@ -2127,6 +2143,115 @@ mod tests {
             None,
             "the lake is fresh water"
         );
+    }
+
+    /// A musket in weapon option 1, then the fishing key (retail `Fishing`: the pole in the
+    /// gather hand at `FishingEquipped`, 1782652225355, and back in its slot at
+    /// `FishingUnequipped`, 1782652274088): the musket goes away, the pole is in slot 9 and in
+    /// the hand while it is out, the attack key fishes (no shot: the server reads no attack
+    /// key and holds no drawn weapon), and the put-away takes the pole out of the hand.
+    #[test]
+    fn the_pole_is_in_the_gather_hand_while_it_is_out_and_the_musket_stays_away() {
+        use nw_content::fishing::FishingRules;
+        use nw_content::generated::{FishingPolesData, MasterItemDefinitions, Tables};
+        use nw_content::table::Table;
+        use nw_messages::paperdoll::slot;
+
+        use super::super::gear;
+        use crate::world::tests::{SERVER_TIME, admit_at, connection, world_with_spawns};
+        const POLE: &str = "2hFishingPoleT1";
+        const MUSKET: &str = "2hMusketT1";
+        const NUMBER: u64 = 7;
+        const MUSKET_OPTION: u32 = 0;
+        fn table<T>(rows: Vec<T>) -> Table<T> {
+            Table {
+                source_path: String::new(),
+                unique_id: String::new(),
+                rows,
+            }
+        }
+        let pole_row: FishingPolesData = serde_json::from_value(serde_json::json!({
+            "id": POLE, "cast_distance_range": "5-20", "fish_rarity_roll_modifier": 1.0,
+            "fish_size_roll_modifier": 0, "summer_fish_rarity_roll_modifier": 0.0,
+            "fish_reel_time_seconds": 8, "line_tension_gain_per_second": 12.5,
+            "line_tension_recover_per_second": 47.0,
+        }))
+        .expect("pole row");
+        let pole_item: MasterItemDefinitions = serde_json::from_value(serde_json::json!({
+            "item_id": POLE, "item_class": "EquippableTool+FishingPole", "item_stats_ref": POLE,
+        }))
+        .expect("item row");
+        let mut world = world_with_spawns(Vec::new());
+        let mut content = (*world.content).clone();
+        content.kits = gear::tests::kits_with(&[
+            (POLE, "EquippableTool+FishingPole"),
+            (MUSKET, "EquippableTwoHand+Musket"),
+        ]);
+        content.fishing = FishingRules::from_tables(&Tables {
+            fishing_poles_data: vec![table(vec![pole_row])],
+            master_item_definitions: vec![table(vec![pole_item])],
+            ..Tables::default()
+        });
+        world.content = Arc::new(content);
+        let mut admit = admit_at(NUMBER, 0.0, true);
+        admit.backstory = Some(gear::tests::BACKSTORY.to_owned());
+        world.admit(&admit, NOW, SERVER_TIME).expect("admit");
+        let player_connection = connection(NUMBER);
+        let entity = world.by_connection[&player_connection];
+        let pole = world.content.kits.item(POLE).cloned().expect("pole");
+        let musket = world.content.kits.item(MUSKET).cloned().expect("musket");
+        {
+            let mut player = world.world.get_mut::<Player>(entity).expect("player");
+            let gear = player.gear.as_mut().expect("gear");
+            gear.renew(&musket, 1, slot::MAIN_HAND_OPTION_1, 0);
+            gear.renew(&pole, 1, FISHING_SLOT, 0);
+            assert!(gear.draw(MUSKET_OPTION, NOW, 0));
+        }
+        let in_hand = |world: &SimWorld| {
+            let player = world.world.get::<Player>(entity).expect("player");
+            let gear = player.gear.as_ref().expect("gear");
+            let shown = gear
+                .visible_items()
+                .iter()
+                .find(|worn| worn.slot == slot::GATHERABLE_HAND)
+                .and_then(|worn| worn.item)
+                .map(|item| item.item_index);
+            (shown, gear.hands().drawn, gear.drawn())
+        };
+        let toggle = FishingKeys {
+            toggle: true,
+            ..FishingKeys::default()
+        };
+        let press = |world: &mut SimWorld, counter: u16, at_ms: u64| {
+            let actions = world
+                .world
+                .get_mut::<Player>(entity)
+                .expect("player")
+                .fishing
+                .keys(counter, toggle, true, at_ms);
+            world.fishing_actions(entity, actions, at_ms);
+        };
+        press(&mut world, 1, NOW);
+        assert_eq!(in_hand(&world), (None, None, None), "the musket goes away");
+        world.tick_fishing(NOW + EQUIP_MS);
+        assert_eq!(
+            in_hand(&world),
+            (Some(pole.item_index), Some(slot::GATHERABLE_HAND), None),
+            "the pole is in the gather hand"
+        );
+        assert!(
+            world.fishing_holds_attack(&player_connection),
+            "the attack key casts"
+        );
+        press(&mut world, 2, NOW + EQUIP_MS);
+        world.tick_fishing(NOW + EQUIP_MS + UNEQUIP_MS);
+        assert_eq!(
+            in_hand(&world),
+            (None, None, None),
+            "the pole is back in its slot; the musket stays away"
+        );
+        assert!(!world.fishing_holds_attack(&player_connection));
+        assert!(world.wears_pole(entity));
     }
 
     #[test]

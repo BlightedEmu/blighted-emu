@@ -803,16 +803,27 @@ impl StatusEffects {
     }
 
     /// The multiple of a heal the holder gets (`HealMod`; a consumable's heal also
-    /// `ConsumableHealMod`).
+    /// `ConsumableHealMod`, any other heal `NonConsumableHealMod`: retail `general-other-01`
+    /// healed 356.69 a second in its own Sacred Ground while it held `Upgrade2`'s 0.5 and the
+    /// staff passive's 0.1, see [`nw_content::attribute_damage::AttributeDamage::heal_scaling`]).
     pub(super) fn heal_scale(&self, rules: &StatusEffectRules, consumable: bool) -> f64 {
         self.scale_of(rules, |rule| {
             rule.heal_mod
                 + if consumable {
                     rule.consumable_heal_mod
                 } else {
-                    0.0
+                    rule.non_consumable_heal_mod
                 }
         })
+    }
+
+    /// The multiple of the heals the holder gives whose effect scales with the healer
+    /// (`HealScalingValueMultiplier`, each times its potency: 3 stacks of
+    /// `ATB_Foc_Bonus_250_1_Effect` 0.03, `Status_StatSwap_OutgoingHealing` of a gear score 625
+    /// weapon 0.012). Inferred: it multiplies the whole heal (the fit of
+    /// [`nw_content::attribute_damage::AttributeDamage::heal_scaling`]).
+    pub(super) fn outgoing_heal_scale(&self, rules: &StatusEffectRules) -> f64 {
+        self.scale_of(rules, |rule| rule.outgoing_heal_mod)
     }
 
     /// The multiple of the holder's armor against a hit of physical (`true`) or elemental damage
@@ -1852,6 +1863,30 @@ mod tests {
         assert!((ticks[0].health - SHARE * HIT).abs() < f64::EPSILON);
         assert_eq!(ticks[0].source, PLAYER);
         assert!(!held.add_spell_effect(&rules, "Status_Unknown", PLAYER, HIT, START_MS));
+    }
+
+    /// `Status_Ability_Lifestaff_SacredGround_Upgrade2` (`NonConsumableHealMod` 0.5): the
+    /// holder's heals of effects grow by half (retail `general-other-01` from 727.537 s, see
+    /// [`nw_content::attribute_damage::AttributeDamage::heal_scaling`]); a consumable's heal
+    /// does not, and the heals the holder gives grow by its `HealScalingValueMultiplier` alone.
+    #[test]
+    fn a_non_consumable_heal_mod_leaves_a_consumable_heal_as_it_was() {
+        const UPGRADE_2: &str = "Status_Ability_Lifestaff_SacredGround_Upgrade2";
+        const HEAL_MOD: f64 = 0.5;
+        const OWN_POTENCY: f64 = 1.0;
+        let rules = StatusEffectRules::build(StatusEffectSource {
+            effects: vec![EffectSourceRow {
+                non_consumable_heal_mod: Some(HEAL_MOD),
+                ..row(UPGRADE_2)
+            }],
+            ..StatusEffectSource::default()
+        });
+        let mut held = StatusEffects::default();
+        assert!(held.add_by_id(&rules, UPGRADE_2, OWN_POTENCY, PLAYER, START_MS));
+        let scale = |consumable| held.heal_scale(&rules, consumable);
+        assert!((scale(false) - (OWN_POTENCY + HEAL_MOD)).abs() < f64::EPSILON);
+        assert!((scale(true) - OWN_POTENCY).abs() < f64::EPSILON);
+        assert!((held.outgoing_heal_scale(&rules) - OWN_POTENCY).abs() < f64::EPSILON);
     }
 
     /// A mob's held effects heal it scaled by its `HealMod`s (the ticks [`SimWorld`] heals mobs

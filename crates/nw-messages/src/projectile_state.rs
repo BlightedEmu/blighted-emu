@@ -32,6 +32,10 @@ pub struct ProjectileState {
     pub position: Option<WorldPosition>,
     /// Child 2, `spawnVelocity`, m/s: its direction times its slice's `m_baseSpeed`.
     pub velocity: Option<[f32; 3]>,
+    /// Child 3, `gravityOverride`, m/s²: the gravity of a shot of an arcing attack, a half
+    /// float (Observed: 15 in the grenadier bombs, newchar-retail-2026-09-18 802.637 s; not
+    /// sent for the first mate's anchor at 1247.540 s).
+    pub gravity_override: Option<f32>,
     /// Child 4, `timeAnchorMicroseconds`: microseconds since 2000-01-01 (Inferred; which
     /// clock is Unknown).
     pub time_anchor_us: Option<u64>,
@@ -113,7 +117,7 @@ impl ProjectileState {
             self.position.is_some(),
             false,
             self.velocity.is_some(),
-            false,
+            self.gravity_override.is_some(),
             self.time_anchor_us.is_some(),
             false,
             false,
@@ -137,6 +141,10 @@ impl ProjectileState {
                     writer.u16(half_bits(axis));
                 }
             }
+            3 => drop(
+                self.gravity_override
+                    .map(|gravity| writer.u16(half_bits(gravity))),
+            ),
             4 => drop(self.time_anchor_us.map(|time| writer.u64(time))),
             7 => drop(self.collided_with.map(|target| writer.u64(target))),
             8 => drop(self.hit_volume.map(|volume| writer.u8(volume))),
@@ -194,6 +202,27 @@ mod tests {
         assert_eq!(
             hex(&arrow),
             "018545e54e7d45a65f65159750df55c2224ab88070605040302010bf03e35e00df0322e1691700bc"
+        );
+    }
+
+    /// Retail newchar-retail-2026-09-18 at 802,637 ms: the card state of a grenadier's bomb
+    /// (ranged attack 198 `AI_Undead/Grenadier_Bomb`, row 0 `Drowned_Miner_Bomb` of
+    /// `FTUEDamageTableMiner`, gravity 15), with a made-up owner.
+    #[test]
+    fn the_card_state_of_a_retail_grenadier_bomb_writes_the_same_bytes() {
+        let bomb = ProjectileState {
+            position: Some(at(0x4617_a8b8, 0x450e_4dd2, 0x125d)),
+            velocity: Some([-8.711, -3.561, 3.465]),
+            gravity_override: Some(15.0),
+            owner: Some(SHOOTER),
+            ranged_attack: Some(198),
+            damage_table: Some(0xed2c_c5f5),
+            damage_row: Some(0),
+            ..ProjectileState::default()
+        };
+        assert_eq!(
+            hex(&bomb),
+            "018d4617a8b8450e4dd2125dc85bc31f42ee4b80988070605040302010860303ed2cc5f50000"
         );
     }
 

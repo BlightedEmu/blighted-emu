@@ -1070,7 +1070,7 @@ pub fn pak_path(hint: &str) -> String {
 }
 
 /// The asset of reference `element`; `None` when it names none (no GUID and no path).
-pub(crate) fn asset(element: Option<&Element>) -> Result<Option<AssetRef>, LevelScriptError> {
+pub fn asset(element: Option<&Element>) -> Result<Option<AssetRef>, LevelScriptError> {
     let Some(value) = element.map(|element| element.value.as_slice()) else {
         return Ok(None);
     };

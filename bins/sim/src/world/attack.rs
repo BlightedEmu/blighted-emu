@@ -198,6 +198,9 @@ pub(super) struct Vitals {
     keys: AttackKeys,
     /// The counter (`u16` after the mask) of the newest input record read.
     input_counter: Option<u16>,
+    /// The counter of the newest input record read for its weapon keys
+    /// ([`Vitals::take_weapon_keys`]).
+    weapon_key_counter: Option<u16>,
     /// The mob the player locked on in its newest input.
     lock_target: Option<u64>,
     /// The input record (the request's frame) of the player's last spread shot.
@@ -259,6 +262,7 @@ impl Vitals {
             last_attack_ms: None,
             keys: AttackKeys::NONE,
             input_counter: None,
+            weapon_key_counter: None,
             lock_target: None,
             last_shot_frame: None,
             shot_requested_ms: None,
@@ -859,6 +863,12 @@ impl MobHitStyle {
             ..self
         }
     }
+
+    /// Its row does no damage: a coefficient of 0 (the grenadier bomb's own
+    /// `Drowned_Miner_Bomb`, whose explosion hurts instead, [`super::mob_shot`]).
+    pub(super) fn is_harmless(&self) -> bool {
+        self.damage_scale <= 0.0
+    }
 }
 
 /// A mob swing that has not hit yet.
@@ -871,6 +881,17 @@ pub(super) struct PendingMobSwing {
     swing: MobAttackIntent,
     /// The hit of its move, when the mob has moves.
     hit: Option<MoveHit>,
+}
+
+/// A mob swing whose damage window is open and that did not reach its target yet: it is judged
+/// again each tick until the window closes ([`crate::mob_ai::Strike::open_until_ms`]).
+#[derive(Debug, Clone)]
+pub(super) struct OpenMobSwing {
+    swing: MobAttackIntent,
+    /// The hit of its move, when the mob has moves.
+    hit: Option<MoveHit>,
+    /// The server time of its first miss: a reel of the mob after it ends the swing.
+    since_ms: u64,
 }
 
 /// Where a player aims an attack.
@@ -985,6 +1006,48 @@ const COUNTER_RESTART_GAP: i16 = 512;
 /// Whether input counter `counter` comes after `last`: later, wrapping at `u16::MAX`, or so far
 /// behind that the client counts again from the start (a level load). A record seen before a
 /// restart must not hide every record after it (live 2026-09-18: no attack on the beach counted).
+impl Vitals {
+    /// The weapon key (0 for the first) and the swap weapon key pressed in the records of
+    /// `records` (newest first) that were not read for them yet; each record counts once. The
+    /// keys have a counter of their own: they change the weapon in a hit reaction too, where
+    /// the attack keys are not read ([`SimWorld::attack_input`]).
+    fn take_weapon_keys(&mut self, records: &[InputRecord]) -> (Option<u32>, bool) {
+        let mut weapon_key = None;
+        let mut swap_pressed = false;
+        for record in records.iter().rev() {
+            let counter = record.u16_after_mask;
+            if self
+                .weapon_key_counter
+                .is_some_and(|last| !counter_is_newer(counter, last))
+            {
+                continue;
+            }
+            self.weapon_key_counter = Some(counter);
+            weapon_key = record.weapon_key_pressed().or(weapon_key);
+            swap_pressed |= record.weapon_swap_pressed();
+        }
+        (weapon_key, swap_pressed)
+    }
+}
+
+/// The draw of a press of a weapon key (`weapon_key`) or of the swap weapon key
+/// (`swap_pressed`: [`Gear::swap_key`]) by player `number` at `now_ms`; whether one was pressed.
+fn draw_by_key(
+    gear: &mut Gear,
+    number: u64,
+    (weapon_key, swap_pressed): (Option<u32>, bool),
+    now_ms: u64,
+    time_ns: u64,
+) -> bool {
+    let Some(key) = weapon_key.or_else(|| swap_pressed.then(|| gear.swap_key()).flatten()) else {
+        return false;
+    };
+    if gear.draw(key, now_ms, time_ns) {
+        tracing::debug!(player = number, key, "weapon drawn");
+    }
+    true
+}
+
 pub(super) const fn counter_is_newer(counter: u16, last: u16) -> bool {
     let ahead = counter.wrapping_sub(last) as i16;
     ahead > 0 || ahead < -COUNTER_RESTART_GAP
@@ -2132,6 +2195,24 @@ impl SimWorld {
         self.ability_presses(entity, records);
         if !self.player_control(entity).may_fight() {
             tracing::debug!(player = number, "attack keys while stunned");
+            // A weapon key or the swap key changes the weapon here too. Retail, 1,220 ledgers:
+            // of 55 such presses inside an own hit reaction that changed the weapon, 46 changed
+            // the own paperdoll before the reaction ended and 9 came 15 to 56 ms before its
+            // end; the change came 25 to 135 ms after the press (median 49 ms; outside a
+            // reaction 46 to 48 ms). Unread, the client held the other weapon than the server
+            // and its ability keys used the wrong weapon (live 2026-11-26 00:22). The sheathe
+            // key is not read here: no retail press of it fell inside a reaction (Unknown).
+            let weapon_keys = self
+                .world
+                .get_mut::<Vitals>(entity)
+                .map(|mut vitals| vitals.take_weapon_keys(records));
+            let time_ns = unix_ns(self.server_ms);
+            if let Some(weapon_keys) = weapon_keys
+                && let Some(mut player) = self.world.get_mut::<Player>(entity)
+                && let Some(gear) = player.gear.as_mut()
+            {
+                draw_by_key(gear, number, weapon_keys, now_ms, time_ns);
+            }
             if let Some(mut vitals) = self.world.get_mut::<Vitals>(entity)
                 && vitals.reaction.is_some()
             {
@@ -2195,7 +2276,7 @@ impl SimWorld {
         // time: one record time before the newer one. An attack is a press and its release, or a
         // hold to the charge, of a combo step.
         let mut attacks: Vec<KeyAttack> = Vec::new();
-        let mut weapon_key = None;
+        let weapon_keys = vitals.take_weapon_keys(records);
         // A new press of the attack key, which draws a sheathed weapon (`Gear::draw_to_attack`).
         let mut attack_pressed = false;
         // A new press of the block key (the right-click: a block or an aim), which draws a
@@ -2206,8 +2287,6 @@ impl SimWorld {
         let mut block_pressed = false;
         // A new press of the sheathe key ([`Gear::draw_selected`]).
         let mut sheathe_pressed = false;
-        // A press of the swap weapon key ([`Gear::swap_key`]).
-        let mut swap_pressed = false;
         let newest_counter = records.first().map(|record| record.u16_after_mask);
         // A record's time: one record time before the newer one.
         let record_ms_of = |counter: u16| {
@@ -2223,12 +2302,10 @@ impl SimWorld {
                 continue;
             }
             vitals.input_counter = Some(counter);
-            weapon_key = record.weapon_key_pressed().or(weapon_key);
             let pressed = vitals.keys.pressed_in(record);
             attack_pressed |= pressed;
             block_pressed |= record.blocking() && !vitals.keys.blocking;
             sheathe_pressed |= record.sheathe_pressed();
-            swap_pressed |= record.weapon_swap_pressed();
             let record_ms = record_ms_of(counter);
             match vitals
                 .keys
@@ -2277,30 +2354,21 @@ impl SimWorld {
         if let Some(mut player) = self.world.get_mut::<Player>(entity)
             && let Some(gear) = player.gear.as_mut()
         {
-            let key = weapon_key.or_else(|| swap_pressed.then(|| gear.swap_key()).flatten());
-            match key {
-                Some(key) => {
-                    if gear.draw(key, now_ms, time_ns) {
-                        tracing::debug!(player = number, key, "weapon drawn");
-                    }
-                }
+            if draw_by_key(gear, number, weapon_keys, now_ms, time_ns) {
+                // The key's draw is all this message does to the weapon.
+            } else if sheathe_pressed && gear.drawn().is_some() {
                 // The sheathe key with a weapon drawn starts the sheathe action.
-                None if sheathe_pressed && gear.drawn().is_some() => {
-                    if let Some(after_ms) = sheathe_ms
-                        && gear.sheathe(now_ms, after_ms)
-                    {
-                        tracing::debug!(player = number, after_ms, "weapon sheathed by the key");
-                    }
+                if let Some(after_ms) = sheathe_ms
+                    && gear.sheathe(now_ms, after_ms)
+                {
+                    tracing::debug!(player = number, after_ms, "weapon sheathed by the key");
                 }
-                None => {
-                    if sheathe_pressed && gear.draw_selected(now_ms, time_ns) {
-                        tracing::debug!(player = number, "weapon drawn by the sheathe key");
-                    } else if attack_pressed && gear.draw_to_attack(time_ns) {
-                        tracing::debug!(player = number, "weapon drawn to attack");
-                    } else if block_pressed && gear.draw_to_attack(time_ns) {
-                        tracing::debug!(player = number, "weapon drawn to block or aim");
-                    }
-                }
+            } else if sheathe_pressed && gear.draw_selected(now_ms, time_ns) {
+                tracing::debug!(player = number, "weapon drawn by the sheathe key");
+            } else if attack_pressed && gear.draw_to_attack(time_ns) {
+                tracing::debug!(player = number, "weapon drawn to attack");
+            } else if block_pressed && gear.draw_to_attack(time_ns) {
+                tracing::debug!(player = number, "weapon drawn to block or aim");
             }
         }
         // Every attack of one message has the same receive time, so only the first can hit: the
@@ -3670,10 +3738,22 @@ impl SimWorld {
     /// the points its held effects add (food). Unknown: attribute points of worn gear are not
     /// counted (the sim does not read them).
     fn damage_scaling(&self, entity: Entity, weapon: &WeaponRow) -> f64 {
+        self.level_and_attributes(entity)
+            .map_or(PLAIN_DAMAGE_FACTOR, |(level, values)| {
+                self.content
+                    .attribute_damage
+                    .scaling(level, values, weapon.scaling)
+            })
+    }
+
+    /// The level (from 1, as the damage and heal rules count it) and the attribute values (by
+    /// attribute id, with the points its held effects add: food) of player `entity`.
+    pub(super) fn level_and_attributes(
+        &self,
+        entity: Entity,
+    ) -> Option<(u32, [u32; ATTRIBUTE_COUNT])> {
         let content = &self.content;
-        let Some(player) = self.world.get::<Player>(entity) else {
-            return PLAIN_DAMAGE_FACTOR;
-        };
+        let player = self.world.get::<Player>(entity)?;
         // The progression counts levels from 0; the damage rule from 1.
         let level = content.progression.level_of(player.experience) + 1;
         let mut values = [0; ATTRIBUTE_COUNT];
@@ -3688,9 +3768,7 @@ impl SimWorld {
                         .attribute_bonus(&content.status_effects, index),
                 );
         }
-        content
-            .attribute_damage
-            .scaling(level, values, weapon.scaling)
+        Some((level, values))
     }
 
     /// The share the equip load of player `entity` adds to the damage of its hits
@@ -4094,26 +4172,48 @@ impl SimWorld {
     }
 
     /// Applies the mobs' hits on the players of this sim; a hit on a player ghost goes to its
-    /// sim.
+    /// sim. A swing of a damage window that does not reach its target is judged again each tick
+    /// while its window is open: the body still moves in by its `Homing` clips then. Judged
+    /// once at the window's start, the beach first mate's `Attack_Close_2H_Axe_05` (window
+    /// 0.650 to 1.067 s, homing move 0.600 to 0.833 s) missed a player 2.6 m away who stood
+    /// still (live 2026-11-26 00:22). Retail: 5 hits of that attack landed 687 to 779 ms after
+    /// its start, inside the window and after its start, from starts up to 3.07 m away.
     pub(super) fn mob_hits(
         &mut self,
         intents: Vec<(MobAttackIntent, Option<MoveHit>)>,
         now_ms: u64,
     ) -> Vec<AttackOutcome> {
+        // A mob that died or reeled since its first miss does not hit any more.
+        let waiting: Vec<_> = std::mem::take(&mut self.open_swings)
+            .into_iter()
+            .filter(|open| {
+                self.mobs
+                    .health(open.swing.mob)
+                    .is_some_and(|health| health > 0)
+                    && !self
+                        .mob_timelines
+                        .reeled_since(open.swing.mob, open.since_ms)
+            })
+            .map(|open| (open.swing, open.hit, Some(open.since_ms)))
+            .collect();
         intents
             .into_iter()
-            .filter_map(|(intent, move_hit)| {
+            .map(|(intent, move_hit)| (intent, move_hit, None))
+            .chain(waiting)
+            .filter_map(|(intent, move_hit, waits_since_ms)| {
                 let defender = self.player_by_number(intent.target);
                 let (amount, style, at) = self.mob_intent_hit(&intent, move_hit, defender)?;
-                tracing::debug!(
-                    mob = intent.mob,
-                    target = intent.target,
-                    x = at.x,
-                    y = at.y,
-                    z = at.z,
-                    amount,
-                    "mob attack"
-                );
+                if waits_since_ms.is_none() {
+                    tracing::debug!(
+                        mob = intent.mob,
+                        target = intent.target,
+                        x = at.x,
+                        y = at.y,
+                        z = at.z,
+                        amount,
+                        "mob attack"
+                    );
+                }
                 if let Some(clip) = intent
                     .strike
                     .as_ref()
@@ -4126,6 +4226,19 @@ impl SimWorld {
                     // A swing at a player who moved away misses: retail sends no hit message.
                     let body = self.world.get::<Body>(entity)?.motion.position();
                     if !self.mob_swing_reaches(&intent, at, body) {
+                        let open = intent
+                            .strike
+                            .as_ref()
+                            .and_then(|strike| strike.open_until_ms)
+                            .is_some_and(|until_ms| now_ms < until_ms);
+                        if open {
+                            self.open_swings.push(OpenMobSwing {
+                                since_ms: waits_since_ms.unwrap_or(self.server_ms),
+                                swing: intent,
+                                hit: move_hit,
+                            });
+                            return None;
+                        }
                         tracing::debug!(
                             mob = intent.mob,
                             attack = intent.strike.as_ref().map(|strike| strike.row.as_str()),
@@ -7477,6 +7590,7 @@ mod tests {
                 reach_m: SHAPE_REACH_M,
             },
             ranged: None,
+            open_until_ms: None,
         }
     }
 
@@ -7509,6 +7623,58 @@ mod tests {
             1,
             "2 m away"
         );
+    }
+
+    #[test]
+    fn a_swing_reaches_a_player_who_comes_in_reach_while_its_window_is_open() {
+        const OPEN_MS: u64 = 400;
+        const TICK_MS: u64 = 33;
+        let swing = |x| MobAttackIntent {
+            mob: mob(),
+            target: 1,
+            target_at: Position {
+                x,
+                y: 10.0,
+                z: 50.0,
+            },
+            mob_move: None,
+            strike: Some(crate::mob_ai::Strike {
+                open_until_ms: Some(NOW + OPEN_MS),
+                ..test_strike()
+            }),
+        };
+        // The window closes before the player is in reach: one miss.
+        let mut late = fight();
+        join(&mut late, 2, MOB_X + 10.0);
+        let far = MobAttackIntent {
+            target: 2,
+            ..swing(MOB_X + 10.0)
+        };
+        assert!(
+            late.mob_hits(vec![(far, None)], NOW).is_empty(),
+            "10 m away"
+        );
+        assert_eq!(
+            late.open_swings.len(),
+            1,
+            "it waits while the window is open"
+        );
+        assert!(late.mob_hits(Vec::new(), NOW + OPEN_MS).is_empty());
+        assert!(late.open_swings.is_empty(), "the window closed");
+        // The same swing judged again in its window, with the target in reach then.
+        let mut world = fight();
+        let waiting = OpenMobSwing {
+            swing: swing(MOB_X + 2.0),
+            hit: None,
+            since_ms: world.server_ms,
+        };
+        world.open_swings.push(waiting);
+        assert_eq!(
+            world.mob_hits(Vec::new(), NOW + TICK_MS).len(),
+            1,
+            "2 m away"
+        );
+        assert!(world.open_swings.is_empty(), "it hits once");
     }
 
     #[test]
@@ -8299,6 +8465,35 @@ mod tests {
         assert_eq!(drawn(&world), None, "put away");
         world.attack_input(&connection(1), &[block_press(2, false)], NOW);
         assert_eq!(drawn(&world), None, "the block was held: no new press");
+    }
+
+    #[test]
+    fn a_weapon_key_in_a_hit_reaction_draws_its_weapon() {
+        // Live 2026-11-26 00:22: a player pressed a weapon key in a hit reaction; the client
+        // changed its weapon, the server did not, and the ability keys used the wrong weapon.
+        // Retail: 46 of 55 such presses changed the own paperdoll before the reaction ended.
+        const WEAPON_1_VALUE: usize = 0;
+        const WEAPON_1_BIT: u32 = 9;
+        const REACTION_MS: u64 = 800;
+        let mut world = caster_at(
+            MOB_X + SWORD_REACH_M,
+            crate::combat::test_support::TEST_SWORD_STANCE,
+        );
+        let entity = world.by_connection[&connection(1)];
+        world
+            .world
+            .get_mut::<Vitals>(entity)
+            .expect("vitals")
+            .reaction = Some(crate::world::hit_reaction::PlayerReaction {
+            free_ms: NOW + REACTION_MS,
+        });
+        let mut records = message(1, &[Key::Hold]);
+        records[0].slots.values[WEAPON_1_VALUE] = 1 << WEAPON_1_BIT;
+        assert!(
+            world.attack_input(&connection(1), &records, NOW).is_empty(),
+            "no attack starts in a reaction"
+        );
+        assert_eq!(drawn(&world), Some(slot::MAIN_HAND_OPTION_1));
     }
 
     #[test]

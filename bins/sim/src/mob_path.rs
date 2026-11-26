@@ -23,6 +23,7 @@ use std::sync::atomic::{self, AtomicU64};
 use std::sync::{Arc, Mutex, mpsc};
 use std::time::{Duration, Instant};
 
+use nw_sim_core::walk_map::OffMap;
 use nw_sim_core::{Ground, Position};
 
 use crate::mob_ai::floor_line;
@@ -38,6 +39,12 @@ pub const MAX_EXPANDED: usize = 2_000;
 /// The height of one floor band of a cell, m (our engineering limit: two floors of one cell are
 /// at least a body's height apart).
 const FLOOR_BAND_M: f32 = 1.5;
+/// A search over the walk map that reaches at most this many places and not its goal started
+/// in a pocket of the map (our engineering limit: the place itself and three more 1 m cells;
+/// the two live pockets of 2026-11-26 were 1 and about 3 cells). A dozen was too many: a
+/// javelin thrower on a ruin platform then left the map from a part of the platform of that
+/// size and stood on a brick pile again (real-level test of the platform, 2026-11-26).
+const POCKET_PLACES: usize = 4;
 /// A goal this near (ground plane) ends the search, with a straight floor line to it.
 pub const GOAL_REACH_M: f32 = CELL_M * 1.5;
 /// A goal this far above or below a place is on another floor, m.
@@ -67,6 +74,8 @@ pub struct PathPlan {
     pub next: usize,
     /// It ends at the goal (`false`: at the place nearest to it).
     pub complete: bool,
+    /// It was found without the walk map ([`find_path`]): the mob walks it without the map.
+    pub off_map: bool,
 }
 
 impl PathPlan {
@@ -120,13 +129,74 @@ impl PartialOrd for Queued {
 
 /// The way over the floors of `ground` from `from` to `to` for a mob of the slope limit
 /// `max_slope_deg`; a partial way to the reachable place nearest `to` when `to` cannot be
-/// reached. `None` when no step from `from` gets nearer to `to`.
+/// reached. `None` when no step from `from` gets nearer to `to`. With `off_map` the walk map
+/// closes no place ([`OffMap`]: the way home of a mob that the map gives none).
+///
+/// A mob in a pocket of the walk map (the search over the map reaches at most
+/// [`POCKET_PLACES`] places and not the goal) gets the way without the map: the map let it in
+/// (a drop from a closed place into an open one), and no step leads out over the map. Live
+/// 2026-11-26 01:57:16 to 01:58:09: a sailor of a cave stood on a thin mesh inside a crate's
+/// box, 1.2 m from its spawn, with a player 6.5 m away, and its run failed 1,002 times, 19 a
+/// second, with no step.
 pub fn find_path(
     ground: &dyn Ground,
     from: Position,
     to: Position,
     max_slope_deg: Option<f32>,
+    off_map: bool,
 ) -> Option<PathPlan> {
+    let plain = OffMap(ground);
+    let without_map = || {
+        search(&plain, from, to, max_slope_deg)
+            .0
+            .map(|plan| PathPlan {
+                off_map: true,
+                ..plan
+            })
+    };
+    if off_map {
+        return without_map();
+    }
+    let (plan, places) = search(ground, from, to, max_slope_deg);
+    let pocket = places <= POCKET_PLACES && !plan.as_ref().is_some_and(|plan| plan.complete);
+    if pocket {
+        without_map()
+            .map(|way| out_of_the_pocket(ground, way))
+            .or(plan)
+    } else {
+        plan
+    }
+}
+
+/// The way `way` found without the walk map, cut at its first place on the map past a place the
+/// map closes: the mob leaves its pocket by the shortest way over closed places and searches on
+/// over the map from there (`steer_along` drops a walked way that is off the map). A way that
+/// never comes back onto the map stays whole.
+fn out_of_the_pocket(ground: &dyn Ground, way: PathPlan) -> PathPlan {
+    let mut crossed = false;
+    let out = way.points.iter().position(|point| {
+        let closed = ground.closed_by_walk_map(*point);
+        let out = crossed && !closed;
+        crossed |= closed;
+        out
+    });
+    match out {
+        Some(last) if last + 1 < way.points.len() => PathPlan {
+            points: way.points[..=last].to_vec(),
+            complete: false,
+            ..way
+        },
+        _ => way,
+    }
+}
+
+/// The way of [`find_path`] over `ground` as it is, and the number of places the search reached.
+fn search(
+    ground: &dyn Ground,
+    from: Position,
+    to: Position,
+    max_slope_deg: Option<f32>,
+) -> (Option<PathPlan>, usize) {
     // Cells of a search of tens of metres.
     #[allow(
         clippy::cast_possible_truncation,
@@ -179,7 +249,8 @@ pub fn find_path(
         let near_goal = here.at.horizontal_distance(to) <= GOAL_REACH_M
             && (here.at.z - to.z).abs() <= GOAL_HEIGHT_M;
         if near_goal && goal_closed_by_map {
-            return Some(plan(ground, &nodes, node, to, true, max_slope_deg));
+            let way = plan(ground, &nodes, node, to, true, max_slope_deg);
+            return (Some(way), nodes.len());
         }
         if near_goal && let Some(end) = floor_line(ground, here.at, to, max_slope_deg) {
             nodes.push(Node {
@@ -187,14 +258,8 @@ pub fn find_path(
                 cost: here.cost + here.at.horizontal_distance(end),
                 parent: Some(node),
             });
-            return Some(plan(
-                ground,
-                &nodes,
-                nodes.len() - 1,
-                to,
-                true,
-                max_slope_deg,
-            ));
+            let way = plan(ground, &nodes, nodes.len() - 1, to, true, max_slope_deg);
+            return (Some(way), nodes.len());
         }
         let (column, row, _) = key_of(here.at);
         for (step_column, step_row) in NEIGHBOURS {
@@ -226,8 +291,9 @@ pub fn find_path(
             });
         }
     }
-    (estimate(nodes[nearest].at) + CELL_M < estimate(from))
-        .then(|| plan(ground, &nodes, nearest, to, false, max_slope_deg))
+    let way = (estimate(nodes[nearest].at) + CELL_M < estimate(from))
+        .then(|| plan(ground, &nodes, nearest, to, false, max_slope_deg));
+    (way, nodes.len())
 }
 
 /// The way to node `last`, pulled straight where a floor line allows it.
@@ -261,6 +327,7 @@ fn plan(
         points,
         next: 0,
         complete,
+        off_map: false,
     }
 }
 
@@ -275,6 +342,7 @@ struct PathJob {
     from: Position,
     to: Position,
     max_slope_deg: Option<f32>,
+    off_map: bool,
     asked: Instant,
 }
 
@@ -326,9 +394,17 @@ impl PathPool {
         })
     }
 
-    /// Asks the way of mob `mob` from `from` to `to` for its slope limit `max_slope_deg`; the
-    /// ask's id, which its answer carries ([`Self::answers`]).
-    pub fn ask(&self, mob: u64, from: Position, to: Position, max_slope_deg: Option<f32>) -> u64 {
+    /// Asks the way of mob `mob` from `from` to `to` for its slope limit `max_slope_deg`, without
+    /// the walk map when `off_map` ([`find_path`]); the ask's id, which its answer carries
+    /// ([`Self::answers`]).
+    pub fn ask(
+        &self,
+        mob: u64,
+        from: Position,
+        to: Position,
+        max_slope_deg: Option<f32>,
+        off_map: bool,
+    ) -> u64 {
         let id = self.next_id.fetch_add(1, atomic::Ordering::Relaxed);
         let job = PathJob {
             mob,
@@ -336,6 +412,7 @@ impl PathPool {
             from,
             to,
             max_slope_deg,
+            off_map,
             asked: Instant::now(),
         };
         if self.jobs.send(job).is_err() {
@@ -376,7 +453,7 @@ fn search_jobs(
         let answer = PathAnswer {
             mob: job.mob,
             id: job.id,
-            plan: find_path(ground, job.from, job.to, job.max_slope_deg),
+            plan: find_path(ground, job.from, job.to, job.max_slope_deg, job.off_map),
         };
         if done.send(answer).is_err() {
             return;
@@ -417,6 +494,42 @@ mod tests {
         ])
     }
 
+    /// Flat ground whose walk map closes a ring around the origin, the middle open.
+    struct MapRing;
+
+    impl MapRing {
+        const FROM_M: f32 = 1.0;
+        const TO_M: f32 = 3.0;
+
+        fn closed(feet: Position) -> bool {
+            (Self::FROM_M..=Self::TO_M).contains(&feet.horizontal_distance(at(0.0, 0.0)))
+        }
+    }
+
+    impl Ground for MapRing {
+        fn height_at(&self, _: f32, _: f32) -> Option<f32> {
+            Some(GROUND_Z)
+        }
+
+        fn no_stand(&self, feet: Position) -> bool {
+            Self::closed(feet)
+        }
+
+        fn closed_by_walk_map(&self, feet: Position) -> bool {
+            Self::closed(feet)
+        }
+    }
+
+    #[test]
+    fn a_search_from_a_pocket_of_the_walk_map_gives_the_way_without_the_map() {
+        let plan = find_path(&MapRing, at(0.0, 0.0), at(10.0, 0.0), None, false).expect("a way");
+        assert!(plan.complete && plan.off_map, "{plan:?}");
+        // A wall of solids is no pocket of the map: the search stays on the map.
+        let around = find_path(&two_walls(), at(0.0, 0.0), at(14.0, 0.0), None, false)
+            .expect("a way around");
+        assert!(!around.off_map);
+    }
+
     fn walk_is_free(ground: &dyn Ground, from: Position, plan: &PathPlan) -> bool {
         let mut last = from;
         plan.points.iter().all(|point| {
@@ -434,7 +547,7 @@ mod tests {
             floor_line(&ground, from, to, None).is_none(),
             "the straight way is closed"
         );
-        let plan = find_path(&ground, from, to, None).expect("a way");
+        let plan = find_path(&ground, from, to, None, false).expect("a way");
         assert!(plan.complete);
         let end = *plan.points.last().expect("points");
         assert!(end.horizontal_distance(to) < 0.1, "{end:?}");
@@ -456,7 +569,7 @@ mod tests {
             ([18.0, 26.0], [-6.0, -5.0]),
         ]);
         let (from, to) = (at(0.0, 0.0), at(22.0, 0.0));
-        let plan = find_path(&ground, from, to, None).expect("a partial way");
+        let plan = find_path(&ground, from, to, None, false).expect("a partial way");
         assert!(!plan.complete);
         let end = *plan.points.last().expect("points");
         assert!(end.x < 18.0 && end.x > 15.5, "stands at the wall: {end:?}");
@@ -468,8 +581,8 @@ mod tests {
         let ground = Walls(vec![([-2.0, 2.0], [-2.0, 2.0])]);
         // The mob stands in a closed place it may walk out of: the goal is behind it.
         let shut = Walls(vec![([0.5, 100.0], [-100.0, 100.0])]);
-        assert!(find_path(&shut, at(0.0, 0.0), at(10.0, 0.0), None).is_none());
-        let mut plan = find_path(&ground, at(-6.0, 0.0), at(6.0, 0.0), None).expect("a way");
+        assert!(find_path(&shut, at(0.0, 0.0), at(10.0, 0.0), None, false).is_none());
+        let mut plan = find_path(&ground, at(-6.0, 0.0), at(6.0, 0.0), None, false).expect("a way");
         while plan.next_point().is_some() {
             plan.advance();
         }
@@ -500,21 +613,21 @@ mod tests {
         let asks = [(at(0.0, 0.0), at(14.0, 0.0)), (at(-6.0, 0.0), at(6.0, 0.0))];
         let ids: Vec<u64> = asks
             .iter()
-            .map(|&(from, to)| pool.ask(MOB, from, to, None))
+            .map(|&(from, to)| pool.ask(MOB, from, to, None, false))
             .collect();
         let mut answers = answers_of(&pool, asks.len());
         answers.sort_by_key(|answer| answer.id);
         assert_eq!(answers.len(), asks.len(), "every ask is answered");
         for ((answer, id), (from, to)) in answers.iter().zip(ids).zip(asks) {
             assert_eq!((answer.mob, answer.id), (MOB, id));
-            assert_eq!(answer.plan, find_path(&two_walls(), from, to, None));
+            assert_eq!(answer.plan, find_path(&two_walls(), from, to, None, false));
         }
     }
 
     #[test]
     fn a_pool_drops_an_ask_older_than_its_life() {
         let pool = PathPool::new(Arc::new(two_walls()), 1, Duration::ZERO).expect("a pool");
-        pool.ask(1, at(0.0, 0.0), at(14.0, 0.0), None);
+        pool.ask(1, at(0.0, 0.0), at(14.0, 0.0), None, false);
         std::thread::sleep(ANSWER_POLL * 20);
         assert_eq!(pool.answers(), Vec::new(), "no answer to an old ask");
     }

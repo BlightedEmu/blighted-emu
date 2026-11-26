@@ -89,10 +89,12 @@ pub struct EquippedItem {
     /// removed sword's key 4, the next items 6, 7 and 8, a chest put on while key 0 was worn
     /// key 11 and the next boots the freed key 0).
     pub key: u16,
-    /// The item; `None`: a visible slot whose item was removed. Retail keeps such a slot in the
-    /// visible lists with an empty record and visual 0, out of the owned items and the loadout,
-    /// until an item fills it again (retail 2026-09-18: the tutorial sword; a client given a
-    /// shorter list kept the sword in the hand).
+    /// The item; `None`: a visible slot whose item was removed, or a tool slot whose tool is in
+    /// the gather hand. Retail keeps such a slot in its list with an empty record and visual 0,
+    /// out of the owned items and the loadout, until an item fills it again (retail 2026-09-18:
+    /// the tutorial sword; a client given a shorter list kept the sword in the hand; `Fishing`
+    /// at 1782652225355: hidden slot 37 kept its place with an empty record of sync reason 5
+    /// while its pole was in the hand).
     pub item: Option<GearItem>,
 }
 
@@ -121,11 +123,13 @@ impl ShownItem {
     }
 }
 
-/// Whether paperdoll slot `slot_id` shows on the character: the armor and the weapon options.
-/// Other slots (amulet, ring, quick slots, ...) are the paperdoll's hidden items (retail: the
-/// amulet in slot 5 and potions in slot 14).
+/// Whether paperdoll slot `slot_id` shows on the character: the armor, the gather hand and the
+/// weapon options. Other slots (amulet, ring, tools, quick slots, ...) are the paperdoll's hidden
+/// items (retail: the amulet in slot 5 and potions in slot 14). The gather hand holds a tool while
+/// it is used (retail `Fishing` at 1782652225355: the pole of hidden slot 37 shown in slot 9).
 pub const fn is_visible_slot(slot_id: u32) -> bool {
     slot_id <= slot::FEET
+        || slot_id == slot::GATHERABLE_HAND
         || slot::MAIN_HAND_OPTION_1 <= slot_id && slot_id <= slot::OFF_HAND_OPTION_3
 }
 
@@ -261,7 +265,8 @@ pub struct GearExtras {
 /// note: retail answered each weapon key with these maps).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Hands {
-    /// The main-hand option slot drawn; `None`: every weapon is sheathed.
+    /// The main-hand option slot drawn, or the gather hand ([`slot::GATHERABLE_HAND`]) while a
+    /// tool is in it; `None`: every weapon is sheathed.
     pub drawn: Option<u32>,
     /// The main-hand option slot selected (`activeMap`), kept while every weapon is sheathed;
     /// `None`: the drawn one, else the first.
@@ -422,10 +427,6 @@ impl PlayerGear {
                 })
                 .collect()
         };
-        let hidden: Vec<&EquippedItem> = hidden
-            .into_iter()
-            .filter(|worn| worn.item.is_some())
-            .collect();
         let durability = |items: &[&EquippedItem]| -> Vec<u32> {
             items
                 .iter()

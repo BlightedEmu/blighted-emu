@@ -107,7 +107,7 @@ fn kind_of(type_id: &[u8; 16]) -> Option<DoorComponentKind> {
 }
 
 /// The replica index of `component`: `m_replicationIndex` on it or on its base classes.
-fn replica_index(component: &Element) -> Option<u64> {
+pub(crate) fn replica_index(component: &Element) -> Option<u64> {
     let base_class = lowercase_crc32("BaseClass1");
     let mut level = component;
     for _ in 0..MAX_BASE_CLASSES {

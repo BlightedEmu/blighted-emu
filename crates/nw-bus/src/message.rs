@@ -1001,12 +1001,12 @@ pub const MOB_ENTITY_BASE: u64 = 1 << 34;
 
 /// Most bytes of one [`Ghost`] in `postcard`: a 10-byte entity number, three 4-byte floats, two
 /// option tags, and the larger of a mob's state (five 5-byte numbers and a 1-byte flag) and a
-/// player's ([`PlayerGhost`]: about 246 bytes with all its visible items, its view, target,
-/// action and mount, and 13 more bytes per visible item for its look: a 5-byte skin and two
-/// 4-byte dyes), its upper slayer slots ([`GHOST_UPPER_SLOTS_BYTES`]) and their sequence times
+/// player's ([`PlayerGhost`]: about 169 bytes with its view, target, action and mount, and per
+/// visible item 7 bytes for its slot and index ([`GHOST_ITEM_BYTES`]) and 13 for its look: a
+/// 5-byte skin and two 4-byte dyes), its upper slayer slots ([`GHOST_UPPER_SLOTS_BYTES`]) and their sequence times
 /// (an optional float each), and its public profile ([`GHOST_PROFILE_BYTES`]).
-pub const MAX_GHOST_BYTES: usize = 288
-    + GHOST_VISIBLE_ITEMS * GHOST_ITEM_LOOK_BYTES
+pub const MAX_GHOST_BYTES: usize = 211
+    + GHOST_VISIBLE_ITEMS * (GHOST_ITEM_BYTES + GHOST_ITEM_LOOK_BYTES)
     + GHOST_UPPER_SLOTS_BYTES
     + nw_messages::UPPER_SLOTS * OPTION_F32_BYTES
     + GHOST_NAME_POSTCARD_BYTES
@@ -1035,6 +1035,9 @@ const GHOST_NAME_POSTCARD_BYTES: usize = GHOST_NAME_BYTES + 1;
 const U32_BYTES: usize = 5;
 /// Most `postcard` bytes of one ghost item's look.
 const GHOST_ITEM_LOOK_BYTES: usize = 13;
+/// Most `postcard` bytes of one ghost item but its look: the option tag, the 1-byte slot and the
+/// 5-byte item index.
+const GHOST_ITEM_BYTES: usize = 7;
 /// Most `postcard` bytes of an optional `u64`: the option tag and a 10-byte varint.
 const OPTION_U64_BYTES: usize = 11;
 /// Most `postcard` bytes of an optional `u16`: the option tag and a 3-byte varint.
@@ -1045,9 +1048,9 @@ const GHOST_SLOT_BYTES: usize = 2 * OPTION_U64_BYTES + OPTION_U16_BYTES;
 /// the marker and the order flag.
 const GHOST_UPPER_SLOTS_BYTES: usize = 1 + 3 * GHOST_SLOT_BYTES + OPTION_U64_BYTES + 1;
 
-/// The paperdoll slots that show on a character (armor and weapon options; the
+/// The paperdoll slots that show on a character (armor, the gather hand and weapon options; the
 /// `nw_messages::is_visible_slot` slots): a [`PlayerGhost`] carries at most one item for each.
-pub const GHOST_VISIBLE_ITEMS: usize = 11;
+pub const GHOST_VISIBLE_ITEMS: usize = 12;
 
 /// One worn item that shows on a player ghost: its slot, item and look, all that the public
 /// paperdoll of another player names (retail sends other players the public slot only: no
