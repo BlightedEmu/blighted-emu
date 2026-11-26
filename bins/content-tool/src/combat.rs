@@ -209,7 +209,7 @@ pub fn check(data: &CombatData, spawns: &[VitalsSpawn], nwdb: &[NwdbCreature]) -
 
 #[cfg(test)]
 mod tests {
-    use nw_content::combat::{CombatRows, CombatSource, LevelRow, MobType, WeaponRow};
+    use nw_content::combat::{CombatRows, CombatSource, LevelRow, MobType, PLAIN_SCALE, WeaponRow};
     use nw_formats::objectstream::lowercase_crc32;
 
     use super::*;
@@ -233,6 +233,7 @@ mod tests {
                     damage_mod: 1.0,
                     creature_type: None,
                     guard: None,
+                    scale: PLAIN_SCALE,
                 },
             )],
             levels: vec![(
