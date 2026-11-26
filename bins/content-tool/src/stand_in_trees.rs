@@ -19,7 +19,8 @@
 //!   anchor slam behind its `SpellCD` cooldown (10 to 14 s at his tier). A second retail fight
 //!   (the Linux main quest playthrough, part 1, 819480 ms) shows `Officer_AnchorSlam` right after
 //!   `Attack_Combo_GreatAxeman_3`. The branch's ocean shield is left out (no retail fight shows
-//!   it). Its place in the selector is Inferred.
+//!   it). Its place in the selector is Inferred. The branch stays inside the officer's own
+//!   `CloseRange` condition (target within 3 m): the slam does not move him in.
 
 use nw_ai::classes::{Class, class_of};
 use nw_formats::objectstream::{Element, lowercase_crc32, parse_object_stream};
@@ -45,6 +46,9 @@ const TOSS_SELECTOR: &str = "FarSelector";
 const TIER_CHECK: &str = "MediumDifficultyCheck";
 /// The key of the tier condition.
 const TIER_KEY: &str = "Difficulty_Tier";
+/// The officer's branch for a target within 3 m (`Target_Dist <= 3.0`), which holds
+/// [`SLAM_BRANCH`].
+const SLAM_RANGE: &str = "CloseRange";
 /// The officer's close range branch that slams behind `SpellCD`.
 const SLAM_BRANCH: &str = "SpellCDCheck";
 /// The selector of [`SLAM_BRANCH`] that picks the shield or the slam.
@@ -129,6 +133,19 @@ fn janszoon_tree(entries: &[(String, Vec<u8>)]) -> Result<Element, StandInError>
     {
         return Err(shape(SLAM_SELECTOR));
     }
+    // The slam keeps the officer's own range: the great axeman's close range is 4 m, and the
+    // slam does not move him in (its homing clip: `MoveToTarget` false). Picked at up to 4 m it
+    // did not reach a player 2.6 to 3.9 m away (live 2026-11-26 00:21 to 00:23).
+    let mut slam_in_range =
+        branch(&officer, SLAM_RANGE, Some(SLAM_TASK)).ok_or_else(|| shape(SLAM_RANGE))?;
+    slam_in_range
+        .children
+        .first_mut()
+        .and_then(|node| field_mut(node, CHILD))
+        .ok_or_else(|| shape(SLAM_RANGE))?
+        .children
+        .clone_from(&slam.children);
+    let slam = slam_in_range;
     let mut tier_conditions = 0;
     for_each_mut(&mut toss, &mut |element| {
         if node_name(element) != Some(TIER_CHECK) {
@@ -356,11 +373,18 @@ mod tests {
                         .first()
                         .and_then(|pointer| pointer.children.first())
                         .and_then(node_name)
-                        == Some(SLAM_BRANCH)
+                        == Some(SLAM_RANGE)
                 })
         })
-        .expect("the slam first in the close range selector");
+        .expect("the slam's range first in the close range selector");
         let slam = &field(close, CHILDREN).expect("children").children[0];
+        let in_range = slam
+            .children
+            .first()
+            .and_then(|range| field(range, CHILD))
+            .and_then(|pointer| pointer.children.first())
+            .and_then(node_name);
+        assert_eq!(in_range, Some(SLAM_BRANCH), "only the slam in its range");
         assert!(holds_text(slam, SLAM_TASK));
         assert!(!holds_text(slam, "Officer_OceanShield_CAGE_Task"));
         assert!(!holds_text(slam, "Officer_OceanShield_Easy_CAGE_Task"));

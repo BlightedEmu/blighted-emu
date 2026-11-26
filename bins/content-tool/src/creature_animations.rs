@@ -516,9 +516,43 @@ fn hand_item_in(all: &[&Element], hand: u32) -> Option<String> {
 pub struct WeaponLook {
     /// The weapon row's `MannequinTag` tags.
     pub tags: Vec<String>,
+    /// The weapon row's `OffHandMannequinTag` tags: what the item gives the Mannequin in the
+    /// off hand (the undead hunter's torch: `Torch_OH`, with `MannequinTag` `1H_Melee,Sword`).
+    pub off_hand_tags: Vec<String>,
     /// The weapon row's `AnimDbPath` (lowercase): the animation database its `WeaponContext`
     /// scope plays the creature's fragments from.
     pub animation_database: Option<String>,
+}
+
+/// The tags of a weapon row's Mannequin tag column `column`.
+fn mannequin_tags(column: Option<&str>) -> Vec<String> {
+    column
+        .unwrap_or_default()
+        .split(MANNEQUIN_TAG_SEPARATOR)
+        .map(str::trim)
+        .filter(|tag| !tag.is_empty())
+        .map(str::to_owned)
+        .collect()
+}
+
+/// The Mannequin tags the items in a creature's hands add: the main hand's `MannequinTag`
+/// tags, and the off hand's `MannequinTag` and `OffHandMannequinTag` tags, each once. Every
+/// throw and crossbow fragment of the undead animation database needs `Torch_OH`, which only
+/// the torch's `OffHandMannequinTag` holds: without it a grenadier's throw task found no
+/// fragment and ended at once (live 2026-11-26 00:20:26, and 2026-11-24 06:12:13).
+fn hand_tags(main_hand: Option<&WeaponLook>, off_hand: Option<&WeaponLook>) -> Vec<String> {
+    let mut tags: Vec<String> = Vec::new();
+    let held = main_hand.into_iter().flat_map(|hand| &hand.tags).chain(
+        off_hand
+            .into_iter()
+            .flat_map(|hand| hand.tags.iter().chain(&hand.off_hand_tags)),
+    );
+    for tag in held {
+        if !tags.contains(tag) {
+            tags.push(tag.clone());
+        }
+    }
+    tags
 }
 
 /// The weapon look of each item's weapon row (by lowercase item id): the master item's
@@ -529,15 +563,8 @@ pub fn item_weapons(tables: &Tables) -> HashMap<String, WeaponLook> {
         .iter()
         .flat_map(|table| &table.rows)
         .map(|row| {
-            let tags = row
-                .mannequin_tag
-                .as_deref()
-                .unwrap_or_default()
-                .split(MANNEQUIN_TAG_SEPARATOR)
-                .map(str::trim)
-                .filter(|tag| !tag.is_empty())
-                .map(str::to_owned)
-                .collect();
+            let tags = mannequin_tags(row.mannequin_tag.as_deref());
+            let off_hand_tags = mannequin_tags(row.off_hand_mannequin_tag.as_deref());
             let animation_database = row
                 .anim_db_path
                 .as_deref()
@@ -547,6 +574,7 @@ pub fn item_weapons(tables: &Tables) -> HashMap<String, WeaponLook> {
                 row.weapon_id.to_lowercase(),
                 WeaponLook {
                     tags,
+                    off_hand_tags,
                     animation_database,
                 },
             )
@@ -793,9 +821,7 @@ pub fn build_rows(
             .off_hand
             .as_ref()
             .and_then(|item| weapons.get(&item.to_lowercase()));
-        for hand in [weapon, off_hand].into_iter().flatten() {
-            default_tags.extend(hand.tags.iter().cloned());
-        }
+        default_tags.extend(hand_tags(weapon, off_hand));
         let database = mannequin
             .animation_database
             .as_ref()
@@ -1030,6 +1056,27 @@ mod tests {
     }
 
     /// The dryad soldier's paperdoll: its sword in slot 24 and its kite shield in slot 27.
+    #[test]
+    fn an_off_hand_item_gives_its_off_hand_tags() {
+        let look = |tags: &[&str], off_hand_tags: &[&str]| WeaponLook {
+            tags: tags.iter().map(|tag| (*tag).to_owned()).collect(),
+            off_hand_tags: off_hand_tags.iter().map(|tag| (*tag).to_owned()).collect(),
+            animation_database: None,
+        };
+        let weapon = look(&["1H_Ranged"], &["Unused_OH"]);
+        let torch = look(&["1H_Melee", "Sword"], &["Torch_OH"]);
+        let shield = look(&["Shield_OH"], &["Shield_OH"]);
+        assert_eq!(
+            hand_tags(Some(&weapon), Some(&torch)),
+            ["1H_Ranged", "1H_Melee", "Sword", "Torch_OH"]
+        );
+        assert_eq!(
+            hand_tags(Some(&weapon), Some(&shield)),
+            ["1H_Ranged", "Shield_OH"]
+        );
+        assert_eq!(hand_tags(Some(&weapon), None), ["1H_Ranged"]);
+    }
+
     #[test]
     fn a_slice_names_its_off_hand_item() {
         let hand = |slot: u32, item: &str| {

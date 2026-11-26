@@ -887,7 +887,7 @@ mod tests {
         assert_eq!(boar.nav_configs[run].max_speed, RUN_MAX_SPEED);
         let task = data.name_id("Attack_Gore_CAGE_Task").expect("task");
         let gore = data.cage_action(boar, task).expect("gore");
-        let done = gore.done_after_s(&|_| false).expect("length");
+        let done = gore.done_after_s(&|_| false, 0.0).expect("length");
         assert!((done - GORE_DONE_S).abs() < CLOSE_S, "{done}");
         let damage = data.name_id("CAGE-Damage").expect("kind");
         let row = data.name_id("DamageTableRow").expect("param");
