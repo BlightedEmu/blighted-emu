@@ -2001,12 +2001,11 @@ pub(in crate::world) mod tests {
                 },
             ),
             [ServerMessage::GameMode(
-                GameModeServerMsg::StartMatchmakingRoleSelection {
+                GameModeServerMsg::direct_role_selection(
                     header,
-                    flag: 1,
-                    activity: super::super::queue::CATACOMBS_ACTIVITY,
-                    extra: 1,
-                }
+                    super::super::queue::CATACOMBS_ACTIVITY,
+                    1,
+                ),
             )]
         );
         for role in [1, 3] {

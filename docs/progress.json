@@ -1837,6 +1837,18 @@
             {
               "check": "A mob that runs plays its run animation (2026-11-26, seen live). Before, 169 mob kinds got a run action the game client has no number for (`Move_Combat_Blocking`), and the server sent the idle pose in its place: a named knife mob slid over the ground with still legs in 18 of 18 runs. Now a task goes to the first action the creature's grid names; retail sends `Move_Combat` for the same mob. A damned pistol mob's shot now has an action too (before, its shot never started). Not checked live: the other mob kinds, and walk or strafe actions that still have no client number (the server now logs each one).",
               "proof": "live"
+            },
+            {
+              "check": "A mob's size number (`CharacterScale` of its vitals row) scales its move speed, its accelerations, its root motion and the reach of its damage windows (2026-11-26, tests only). Before, the server never read the number: 5,620 of 7,408 mob rows are not 1. Retail proof for speed: the beach first mate (1.45) strafes at 1.77 m/s where his data says 1.25, and patrols at 1.21 where it says 0.85; a named knife mob (1.4) runs at 7.3 m/s where its data says 5.2; a grenadier with no number moves at its data speed. Inferred: the reach of a damage window grows by the same number. Not scaled: the body radius and the homing distances. Not measured again: the first mate's misses against a fast player.",
+              "proof": "tests"
+            },
+            {
+              "check": "A mob hears a player who moves fast near it, also from behind (2026-11-26, tests only). A player within 6 m who moves at 2 m/s or more is perceived like a seen one; a player who stands, crouch-walks slowly or is farther is not. Inferred: both numbers; no retail capture or game data value was found for them.",
+              "proof": "tests"
+            },
+            {
+              "check": "A walk or strafe action the game client has no number for is sent as a numbered action of the same animation fragment (2026-11-26, tests only). Before, the server sent the idle pose for it and the mob slid. Open: 3,266 used grid tasks point at actions the creature's grid does not name; the rule for those is Unknown.",
+              "proof": "tests"
             }
           ]
         },
@@ -3085,6 +3097,14 @@
             {
               "check": "Mount race courses by bots (2026-11-22): `0334_0102` and the three `09A_S11` time trials end.",
               "proof": "bots"
+            },
+            {
+              "check": "A game master gives Marks of Fortune in chat (`!marks <amount> [player]`) and the store wallet of that player shows the new balance at once, with no new login (2026-11-26, tests only). Open: Marks given with the command line tool (`blighted-admin give-marks`) still show only after a new login.",
+              "proof": "tests"
+            },
+            {
+              "check": "A store mount of a type the character did not unlock is refused, and the server log now says why (`mount choice refused`: no such mount, not owned, or type locked) (2026-11-26, tests only). The rule itself is from the game data and public guides: a mount type opens with its riding quest; no retail capture shows a store mount of a locked type.",
+              "proof": "code"
             }
           ]
         },
@@ -3181,8 +3201,8 @@
               "proof": "tests"
             },
             {
-              "check": "Not made: the group finder. Its listing, application and accept calls (3509, 3510, 3515, 105) and a list answer with entries are in none of our 1,195 retail ledgers (a second capture archive has recordings of all four calls, not their bytes); the group finder group state (1091) is not sent.",
-              "proof": "none"
+              "check": "Group finder observed calls and lobby state: 1960/3461 (list), 1147/2010 (get lobby details), 3485 (application accepted), 3245/3475 (decline invite), 5355 (application subscription), 4739 (confirm conversion into a real group), replicated state 1091 codec, and groupFinderGroupId on GroupsState (1994). Still uncaptured in our retail ledgers: 3509, 3510, 3515, 105 and a non-empty 3461 entry.",
+              "proof": "tests"
             },
             {
               "check": "Live: a group that turns into a raid in the client, with the vote and the raid window.",
@@ -3651,8 +3671,8 @@
               "proof": "tests"
             },
             {
-              "check": "Not made: the queue for random activities (6322): one retail sample, and the activity list of its answer is not understood.",
-              "proof": "none"
+              "check": "Random regular expedition queue (6322): 6322 (activity type 7, difficulty 0, fill) answers with 6295 listing the 12 regular expedition activity ids, queues under Dungeon (CRC 0x3ffa1f90, matchmaking activity 7), forms a 5-player party on world-director (all-accept), and moves accepted players into a regular expedition instance.",
+              "proof": "tests"
             },
             {
               "check": "Outpost Rush queue as retail: the join (6254 with activity 3116, 6295), the two role picks, the queue entry with matchmaking activity 0, the pop (status 10, match id, 40 desired players), the invite once the match's instance is open (status 1), and each player's own move at its accept (5449, 5450, status 5).",
@@ -4471,6 +4491,7 @@
     }
   ],
   "nextSteps": [
+    "**Live check after the night of 2026-11-26.**\n\n- Beach first mate: does he hit a player who runs and dodges, and is his speed right.\n- Run up behind a mob: it must turn and attack.\n- Mobs that slid before: do their legs move.\n- `!marks 1000` in chat: the store counter must change at once.\n- Store mount of a locked type: read the `mount choice refused` line of the sim log.",
     "**Bots, 2026-11-25.**\n\n- Main story: one new character through the whole list in one run with no restart.\n- Catacombs: the side gates and the key (retail rule Unknown). Raids: the later bosses and the run end; the second raid.\n- Open world encounters: read the trigger areas and the horn of the encounter slices, so a wait ends by the real trigger and not by the fight area.\n- World bosses and world tours: none is on the schedule now; a schedule rule is needed first. Artifacts: no loot table of this build drops one.\n- Free-for-all zone and influence towers: server rules have tests only; no bot check yet.",
     "**Store with the real game client (2026-11-24): live check.**\n\n- Give an account Marks of Fortune (`blighted-admin give-marks <login name> 100000`) and log in.\n- Open the change mount screen: the store mounts must show their prices and no \"requires Rise of the Angry Earth\" text, and the Marks of Fortune counter must show the balance.\n- Buy a mount: the balance goes down by its price and the mount can be chosen.\n- If the text or a zero balance stays, read the `store call` lines of the edge log: they show which id the client names in its store paths.",
     "**Bots, night of 2026-11-24.**\n\n- Main story: the missing floor on the Arcturus tower top (`99A_MSQ_03`), the knight fight of `99C_MSQ_05`, then one bot run from the beach to the end of the list.\n- Expeditions: Savage Divide and Glacial Tarn; raids and catacombs need a bot flow.\n- Trials: Medusa, Dracula's later phases, Mahantaram, Varlaam, the wolf trial.\n- Corrupted breaches: the major portal's core has no mob, so a breach cannot end; the staff's close of a breach is not built.\n- World bosses, world tours and artifact drops by bots.\n- Achievements: compare more quests with retail captures (whisper, talk and cinematic achievements differ); area charting by a bot.\n- Seasonal events: a rule for the game data's schedules and their remote config overrides.",
@@ -4562,6 +4583,7 @@
     "**Content folder layout (2026-11-16):** log in and play on the game VM, and run one admin site Apply with a design file on the new layout."
   ],
   "done": [
+    "Night of 2026-11-26 (tests only, on the PC and the game VM): mobs use their size number for speed and reach; mobs hear a fast player behind them; walk and strafe actions with no client number fall back to a numbered action of the same fragment; `!marks` gives Marks of Fortune that show at once; a refused mount choice is logged with its reason.",
     "Mobs without a Server.pak behaviour tree (2026-11-26, tests only): `content-tool ai-data` now binds sibling Server.pak trees (plague rats, fox, lion diver, catacombs and solo bosses) and builds stand-in trees from `baseai` sub-trees and each creature's own CAGE grid attacks for spiders, werebeasts, Upyr, Inquisitors, feral ghouls, bloodbeasts and more (960 of 986 archetypes now have a tree). Sim test proves spiders, plague rats, werebeasts, Upyr and Inquisitors chase and attack; the three FTUE tutorial mobs stay on their measured script.",
     "Bots play the whole main story (2026-11-25): one bot ended 124 of the 129 list quests (the 5 others are twins of other character kinds), all 12 expeditions end, 12 story trials end, a raid of 10 kills its first boss, and elite chests open in four zones.",
     "PvP bots (2026-11-25, bots): a new `arena` bot run queues bots for the arena as a client does and fights to the match end: 13 1v1 matches and 22 3v3 matches, plus 20 duels. Two server faults found and fixed: the AFK rule removed players at a round start with no warning, and the director could stop an instance sim that had just got a match.",

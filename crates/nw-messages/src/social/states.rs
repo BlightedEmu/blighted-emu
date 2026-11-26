@@ -60,6 +60,7 @@ const OPPOSING_RAID_ID: u8 = 2;
 /// Groups slot 1: `raidType` to `isGroupPristine`.
 const GROUPS_SLOT_1_CHILDREN: u8 = 10;
 const RAID_TYPE: u8 = 0;
+const GROUP_FINDER_GROUP_ID: u8 = 1;
 const GROUP_FINDER_CREATOR: u8 = 2;
 const CREATE_SOURCE: u8 = 3;
 const INBOUND_INVITES: u8 = 5;
@@ -335,6 +336,8 @@ pub struct GroupsState {
     pub opposing_raid_id: Option<u64>,
     /// Slot 1 child 0 `raidType`.
     pub raid_type: Option<u8>,
+    /// Slot 1 child 1 `groupFinderGroupId`: the Group Finder lobby (all zero for none).
+    pub group_finder_group_id: Option<[u8; RAW_ID_LEN]>,
     /// Slot 1 child 2 `isGroupFinderGroupCreator`.
     pub group_finder_creator: Option<bool>,
     /// Slot 1 child 3 `createSource`.
@@ -366,6 +369,7 @@ impl GroupsState {
                 (0, RAID_ID) => state.raid_id = Some(reader.u64()?),
                 (0, OPPOSING_RAID_ID) => state.opposing_raid_id = Some(reader.u64()?),
                 (_, RAID_TYPE) => state.raid_type = Some(reader.u8()?),
+                (_, GROUP_FINDER_GROUP_ID) => state.group_finder_group_id = Some(reader.raw_id()?),
                 (_, GROUP_FINDER_CREATOR) => state.group_finder_creator = Some(reader.boolean()?),
                 (_, CREATE_SOURCE) => state.create_source = Some(reader.u8()?),
                 (_, INBOUND_INVITES) => {
@@ -403,7 +407,7 @@ impl GroupsState {
         ]);
         let slot_1 = mask(&[
             self.raid_type.is_some(),
-            false,
+            self.group_finder_group_id.is_some(),
             self.group_finder_creator.is_some(),
             self.create_source.is_some(),
             false,
@@ -438,6 +442,9 @@ impl GroupsState {
                     }
                     (_, RAID_TYPE) => {
                         self.raid_type.map(|value| writer.u8(value));
+                    }
+                    (_, GROUP_FINDER_GROUP_ID) => {
+                        self.group_finder_group_id.map(|id| writer.bytes(&id));
                     }
                     (_, GROUP_FINDER_CREATOR) => {
                         self.group_finder_creator.map(|value| writer.boolean(value));
@@ -1019,10 +1026,15 @@ mod tests {
 
     #[test]
     fn a_group_finder_child_stops_the_walk() {
+        // Child 4 (`groupFinderApplications`) is unsized; child 1 (`groupFinderGroupId`) is sized.
         assert!(matches!(
-            GroupsState::read(&mut Reader::new(&[SLOT_1_BIT, 0b10])),
+            GroupsState::read(&mut Reader::new(&[SLOT_1_BIT, 0b1_0000])),
             Err(MessageError::Unsized { .. })
         ));
+        let mut bytes = vec![SLOT_1_BIT, 0b10];
+        bytes.extend_from_slice(&[0x33; RAW_ID_LEN]);
+        let state = groups_round(&bytes);
+        assert_eq!(state.group_finder_group_id, Some([0x33; RAW_ID_LEN]));
     }
 
     fn social_round(bytes: &[u8]) -> SocialState {

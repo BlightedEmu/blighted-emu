@@ -111,6 +111,34 @@ impl SimWorld {
                     GameModeServerMsg::QueueGroupRemoved { header },
                 )));
             }
+            GameModeClientMsg::JoinQueueForRandomActivities {
+                activity_type,
+                difficulty,
+                fill,
+                ..
+            } => {
+                let answer =
+                    self.join_random_queue(entity, number, (activity_type, difficulty, fill));
+                let refused = matches!(
+                    answer,
+                    None | Some(ServerMessage::GameMode(
+                        GameModeServerMsg::QueueGroupRemoved { .. }
+                    ))
+                );
+                if refused {
+                    metrics::counter!(METRIC_REFUSED_QUEUES).increment(1);
+                    tracing::info!(
+                        player = number,
+                        activity_type,
+                        difficulty,
+                        fill,
+                        "random queue join refused: activity not supported or player may not queue"
+                    );
+                }
+                answers.push(answer.unwrap_or(ServerMessage::GameMode(
+                    GameModeServerMsg::QueueGroupRemoved { header },
+                )));
+            }
             GameModeClientMsg::SetMatchmakingRole { role, .. } => self.pick_role(entity, role),
             GameModeClientMsg::CancelRoleSelection { .. } => {
                 answers.push(self.cancel_role_pick(entity, number));

@@ -9,6 +9,7 @@
 mod chat;
 mod companies;
 pub mod effects;
+pub mod group_finder;
 mod groups;
 mod people;
 mod player_raids;

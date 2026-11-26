@@ -74,9 +74,8 @@ use super::{Player, SimWorld, send_now, unix_ns};
 /// The 6254 activities of the queued game modes.
 pub(super) use nw_messages::game_mode::{
     ARENA_ACTIVITY, CAPTURE_THE_FLAG_ACTIVITY, CATACOMBS_ACTIVITY, OUTPOST_RUSH_ACTIVITY,
+    RANDOM_DUNGEON_ACTIVITY_TYPE, RANDOM_REGULAR_EXPEDITION_ACTIVITIES,
 };
-/// The first byte of every retail 6295.
-const ROLE_SELECTION_FLAG: u8 = 1;
 /// The 6272 calls of one join; the last one queues (Observed: two per join).
 const ROLE_PICKS: u8 = 2;
 /// `matchmakingServiceActivity` while queued for the arena, for Outpost Rush, for capture the
@@ -87,6 +86,12 @@ const CAPTURE_THE_FLAG_QUEUED_ACTIVITY: u8 = 4;
 /// `matchmakingServiceActivity` while queued for the catacombs (Observed: `CATACOMBS2` 7.006 s,
 /// `CATACOMBS6` 13.649 s, `Hive catacombs test 4` 106.205 s).
 const CATACOMBS_QUEUED_ACTIVITY: u8 = 6;
+/// Game mode id and CRC (`lowercase_crc32("dungeon")`) of the random regular expedition queue
+/// (Observed: `ledger-626852fecd022451` 264.439 s `queuingForGameModes` mode `0x3ffa1f90`,
+/// `matchmakingServiceActivity` `7`).
+pub(super) const RANDOM_DUNGEON_GAME_MODE: &str = "Dungeon";
+pub(super) const RANDOM_DUNGEON_CRC: u32 = 0x3ffa_1f90;
+const RANDOM_DUNGEON_REGULAR_DIFFICULTY: u8 = 0;
 const IDLE_ACTIVITY: u8 = 0x16;
 /// `matchmakingServiceStatus` values (Observed): none, a pop, the wait after it, the move.
 const STATUS_NONE: u32 = 0;
@@ -118,8 +123,10 @@ const NS_PER_SECOND: u64 = 1_000_000_000;
 struct RolePick {
     /// The game mode's CRC.
     crc: u32,
-    /// Whether it queues with its group (the 6254's flag).
+    /// Whether it queues with its group / fill (the 6254 flag or 6322 fill byte).
     group: bool,
+    /// Whether this join came from 6322 (random regular expedition).
+    random_dungeon: bool,
     /// The 6272 calls so far.
     picks: u8,
     /// The newest role.
@@ -267,15 +274,60 @@ impl SimWorld {
         player.queue.picking = Some(RolePick {
             crc,
             group,
+            random_dungeon: false,
+            picks: 0,
+            role: 0,
+        });
+        Some(ServerMessage::GameMode(
+            GameModeServerMsg::direct_role_selection(header, activity, extra),
+        ))
+    }
+
+    /// 6322: player `entity` (`number`) joins the random activity queue (`activity_type`,
+    /// `difficulty`, `fill`). Currently supports random regular expeditions (`activity_type = 7`,
+    /// `difficulty = 0`, Observed in `ledger-626852fecd022451`).
+    pub(super) fn join_random_queue(
+        &mut self,
+        entity: Entity,
+        number: u64,
+        (activity_type, difficulty, fill): (u8, u8, bool),
+    ) -> Option<ServerMessage> {
+        let header = participant_header(number);
+        let now_ns = unix_ns(self.server_ms);
+        let supported = activity_type == RANDOM_DUNGEON_ACTIVITY_TYPE
+            && difficulty == RANDOM_DUNGEON_REGULAR_DIFFICULTY
+            && !self.instance_sim
+            && !self.settings.closed_queues.holds(InstanceKind::Expedition)
+            && self
+                .content
+                .instances
+                .modes()
+                .any(|mode| mode.kind == InstanceKind::Expedition);
+        let mut player = self.world.get_mut::<Player>(entity)?;
+        let barred = player
+            .arena
+            .queue_eligible()
+            .iter()
+            .any(|(mode, from_ns)| *mode == RANDOM_DUNGEON_CRC && now_ns < *from_ns);
+        if !supported || barred || player.queue.is_queued() {
+            return Some(ServerMessage::GameMode(
+                GameModeServerMsg::QueueGroupRemoved { header },
+            ));
+        }
+        player.queue.picking = Some(RolePick {
+            crc: RANDOM_DUNGEON_CRC,
+            group: fill,
+            random_dungeon: true,
             picks: 0,
             role: 0,
         });
         Some(ServerMessage::GameMode(
             GameModeServerMsg::StartMatchmakingRoleSelection {
                 header,
-                flag: ROLE_SELECTION_FLAG,
-                activity,
-                extra,
+                activities: RANDOM_REGULAR_EXPEDITION_ACTIVITIES.to_vec(),
+                activity_type,
+                is_random: true,
+                fill,
             },
         ))
     }
@@ -299,8 +351,30 @@ impl SimWorld {
         }
         let pick = *pick;
         player.queue.picking = None;
-        let Some(mode) = content.instances.by_crc(pick.crc) else {
-            return;
+        let (activity, game_mode, level) = if pick.random_dungeon {
+            let expeditions: Vec<_> = content
+                .instances
+                .modes()
+                .filter(|mode| mode.kind == InstanceKind::Expedition)
+                .collect();
+            if expeditions.is_empty() {
+                return;
+            }
+            let chosen = expeditions[(unix_s as usize) % expeditions.len()];
+            (
+                RANDOM_DUNGEON_ACTIVITY_TYPE,
+                RANDOM_DUNGEON_GAME_MODE.to_owned(),
+                chosen.rotation_map(unix_s).folder.clone(),
+            )
+        } else {
+            let Some(mode) = content.instances.by_crc(pick.crc) else {
+                return;
+            };
+            (
+                queued_activity(mode.kind),
+                mode.id.clone(),
+                mode.rotation_map(unix_s).folder.clone(),
+            )
         };
         let queued = Queued {
             crc: pick.crc,
@@ -308,7 +382,6 @@ impl SimWorld {
             match_size: NOT_MATCHED,
         };
         player.list_version += 1;
-        let activity = queued_activity(mode.kind);
         let state = GameModeParticipantState {
             queuing: Some(queue_list(player.list_version, Some(&queued))),
             service: MatchmakingService {
@@ -323,11 +396,11 @@ impl SimWorld {
             sim,
             group: pick.group.then(|| player.social.group()).flatten(),
             role: pick.role,
-            game_mode: mode.id.clone(),
-            level: mode.rotation_map(unix_s).folder.clone(),
+            game_mode: game_mode.clone(),
+            level,
             fill: pick.group,
         });
-        tracing::info!(player = player.number, game_mode = %mode.id, "player queued");
+        tracing::info!(player = player.number, %game_mode, "player queued");
         self.queue_calls.push(call);
         self.put_participant_state(entity, state);
     }
@@ -575,12 +648,28 @@ impl SimWorld {
                 }
             }
             QueueNewsKind::Ready(place) => {
-                let Some(crc) = self
-                    .content
-                    .instances
-                    .by_id(&news.game_mode)
-                    .map(|mode| mode.crc)
-                else {
+                let crc = if news.game_mode == RANDOM_DUNGEON_GAME_MODE {
+                    self.content
+                        .instances
+                        .modes()
+                        .find(|mode| {
+                            mode.kind == InstanceKind::Expedition
+                                && mode.map_of(&place.level).is_some()
+                        })
+                        .or_else(|| {
+                            self.content
+                                .instances
+                                .modes()
+                                .find(|mode| mode.kind == InstanceKind::Expedition)
+                        })
+                        .map(|mode| mode.crc)
+                } else {
+                    self.content
+                        .instances
+                        .by_id(&news.game_mode)
+                        .map(|mode| mode.crc)
+                };
+                let Some(crc) = crc else {
                     return;
                 };
                 let Some(mut player) = self.world.get_mut::<Player>(entity) else {
@@ -808,12 +897,7 @@ pub(super) mod tests {
         assert_eq!(
             answers,
             [ServerMessage::GameMode(
-                GameModeServerMsg::StartMatchmakingRoleSelection {
-                    header,
-                    flag: ROLE_SELECTION_FLAG,
-                    activity: ARENA_ACTIVITY,
-                    extra: 1,
-                }
+                GameModeServerMsg::direct_role_selection(header, ARENA_ACTIVITY, 1)
             )]
         );
         for role in [1, 4] {
@@ -951,15 +1035,12 @@ pub(super) mod tests {
                 }],
             },
         );
-        assert!(matches!(
-            answers.as_slice(),
+        assert_eq!(
+            answers,
             [ServerMessage::GameMode(
-                GameModeServerMsg::StartMatchmakingRoleSelection {
-                    activity: OUTPOST_RUSH_ACTIVITY,
-                    ..
-                }
+                GameModeServerMsg::direct_role_selection(header, OUTPOST_RUSH_ACTIVITY, 1)
             )]
-        ));
+        );
         for role in [1, 3] {
             call(
                 &mut world,
@@ -1093,12 +1174,7 @@ pub(super) mod tests {
         assert_eq!(
             answers,
             [ServerMessage::GameMode(
-                GameModeServerMsg::StartMatchmakingRoleSelection {
-                    header,
-                    flag: ROLE_SELECTION_FLAG,
-                    activity: CAPTURE_THE_FLAG_ACTIVITY,
-                    extra: 1,
-                }
+                GameModeServerMsg::direct_role_selection(header, CAPTURE_THE_FLAG_ACTIVITY, 1)
             )]
         );
         for role in [1, 3] {
@@ -1173,6 +1249,139 @@ pub(super) mod tests {
             [ServerMessage::GameMode(
                 GameModeServerMsg::RoleSelectionCanceled { header }
             )]
+        );
+    }
+
+    #[test]
+    fn a_random_expedition_join_queues_and_moves_into_an_expedition() {
+        let mut world = crate::world::tests::world_with_spawns(Vec::new());
+        let expedition = nw_content::instances::InstanceMode {
+            id: "DungeonAmrine".to_owned(),
+            crc: nw_formats::objectstream::lowercase_crc32("DungeonAmrine"),
+            kind: InstanceKind::Expedition,
+            capacity: 5,
+            min_group: 1,
+            required_level: Some(25),
+            remote_entry: true,
+            map: InstanceMap {
+                map_name: "DungeonAmrine".to_owned(),
+                folder: "nw_dungeon_windsward_00".to_owned(),
+                coatlicue_path: "coatlicue\\nw_dungeon_windsward_00".to_owned(),
+                frame: [0.0, 0.0, 1000.0, 1000.0],
+                map_crc: nw_formats::objectstream::lowercase_crc32("DungeonAmrine"),
+                teleports: vec![Teleport {
+                    position: [120.0, 240.0, 10.0],
+                    yaw_deg: 0.0,
+                }],
+                formation: vec![[0.0, 0.0]],
+            },
+            respawns: true,
+            mutable: false,
+            timeout_seconds: None,
+            victory_delay_seconds: None,
+            items_removed_on_exit: Vec::new(),
+            required_item_classes: Vec::new(),
+            entry_achievement: None,
+            loot_tags: Vec::new(),
+            container_level: None,
+            counter: nw_content::instances::EntryCounter::Uncounted,
+            game_mode_index: nw_content::instances::NO_INDEX,
+            generated: false,
+            rotation: Vec::new(),
+            rotation_span_seconds: None,
+        };
+        world.content = std::sync::Arc::new(crate::player_content::PlayerContent {
+            instances: nw_content::instances::InstanceCatalog::build([expedition]),
+            ..crate::player_content::PlayerContent::default()
+        });
+        crate::world::tests::join(&mut world, PLAYER, 100.0);
+        let header = participant_header(PLAYER);
+        // Retail `ledger-626852fecd022451` 261.870 s: 6322 `07 00 01` -> 6295 with 12 activities.
+        let answers = call(
+            &mut world,
+            nw_messages::GameModeClientMsg::JoinQueueForRandomActivities {
+                header,
+                activity_type: RANDOM_DUNGEON_ACTIVITY_TYPE,
+                difficulty: 0,
+                fill: true,
+            },
+        );
+        assert_eq!(
+            answers,
+            [ServerMessage::GameMode(
+                GameModeServerMsg::StartMatchmakingRoleSelection {
+                    header,
+                    activities: RANDOM_REGULAR_EXPEDITION_ACTIVITIES.to_vec(),
+                    activity_type: RANDOM_DUNGEON_ACTIVITY_TYPE,
+                    is_random: true,
+                    fill: true,
+                }
+            )]
+        );
+        for role in [1, 3] {
+            call(
+                &mut world,
+                nw_messages::GameModeClientMsg::SetMatchmakingRole { header, role },
+            );
+        }
+        let calls = world.take_queue_calls();
+        let [QueueCall::Join(join)] = calls.as_slice() else {
+            panic!("one join: {calls:?}");
+        };
+        assert_eq!(
+            (
+                join.game_mode.as_str(),
+                join.level.as_str(),
+                join.role,
+                join.fill
+            ),
+            (RANDOM_DUNGEON_GAME_MODE, "nw_dungeon_windsward_00", 3, true)
+        );
+        let match_id = Uuid::from_u128(99);
+        world.queue_news(QueueNews {
+            character: join.character,
+            game_mode: RANDOM_DUNGEON_GAME_MODE.to_owned(),
+            kind: QueueNewsKind::Popped { match_id, size: 5 },
+        });
+        let place = MatchPlace {
+            match_id,
+            instance: Uuid::from_u128(100),
+            sim: crate::world::tests::slot("inst-amrine"),
+            phase: 11,
+            level: "nw_dungeon_windsward_00".to_owned(),
+            team: 0,
+            place: 0,
+        };
+        world.queue_news(QueueNews {
+            character: join.character,
+            game_mode: RANDOM_DUNGEON_GAME_MODE.to_owned(),
+            kind: QueueNewsKind::Ready(place),
+        });
+        let sent = world.take_messages();
+        assert!(
+            crate::world::tests::messages_to(&sent, PLAYER)
+                .iter()
+                .any(|msg| matches!(
+                    msg,
+                    ServerMessage::GameMode(GameModeServerMsg::MatchmakingLoginRequested { .. })
+                ))
+        );
+        call(
+            &mut world,
+            nw_messages::GameModeClientMsg::MatchmakingLoginConfirmed { header },
+        );
+        let now = crate::world::tests::NOW;
+        crate::world::tests::tick(&mut world, now + 1);
+        let out = crate::world::tests::tick(
+            &mut world,
+            now + 2 + super::super::PHASING_BEFORE_HANDOFF_MS,
+        );
+        let [start] = out.handoffs.as_slice() else {
+            panic!("one handoff into expedition");
+        };
+        assert_eq!(
+            (start.offer.position.x, start.offer.position.y),
+            (120.0, 240.0)
         );
     }
 }

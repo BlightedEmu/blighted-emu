@@ -82,6 +82,9 @@ pub struct InstancesConfig {
     /// The matchmaking queue of the catacombs.
     #[serde(default)]
     pub catacombs: CatacombsQueueConfig,
+    /// The matchmaking queue of random regular expeditions (`6322`).
+    #[serde(default = "MatchConfig::random_dungeon")]
+    pub random_dungeon: MatchConfig,
 }
 
 /// How long the players have to accept a catacombs run by default (Inferred: the `Catacombs`
@@ -166,6 +169,14 @@ impl MatchConfig {
         Self {
             match_size: DEFAULT_CAPTURE_THE_FLAG_MATCH_SIZE,
             accept_timeout_ms: DEFAULT_CAPTURE_THE_FLAG_ACCEPT_TIMEOUT_MS,
+        }
+    }
+
+    /// Random regular expedition's retail values (5-player party, 45 s accept window).
+    pub const fn random_dungeon() -> Self {
+        Self {
+            match_size: crate::matchmaking::RANDOM_DUNGEON_PLAYERS,
+            accept_timeout_ms: DEFAULT_ACCEPT_TIMEOUT_MS,
         }
     }
 

@@ -76,6 +76,10 @@ struct GroupsView {
     group: [u8; 16],
     /// The raid fields of a raid member ([`crate::raids`]).
     raid: Option<RaidFields>,
+    /// The Group Finder lobby id (`[0; 16]` when none).
+    group_finder_group_id: [u8; 16],
+    /// Whether the player created its Group Finder lobby.
+    group_finder_creator: bool,
     inbound: Vec<GroupInviteData>,
     outbound: Vec<GroupInviteData>,
 }
@@ -259,11 +263,18 @@ impl SocialWorld {
                     create_source: left.create_source.map(|_| LEFT_RAID_CREATE_SOURCE),
                 })
             });
+            let gf_changed = sent.groups.as_ref().is_some_and(|prev| {
+                prev.group_finder_group_id != groups.group_finder_group_id
+                    || prev.group_finder_creator != groups.group_finder_creator
+            }) || groups.group_finder_group_id != NO_ID
+                || groups.group_finder_creator;
             let state = GroupsState {
                 group_id: Some(groups.group),
                 raid_id: fields.map(|fields| fields.raid),
                 opposing_raid_id: fields.map(|fields| fields.opposing),
                 raid_type: fields.map(|fields| fields.kind),
+                group_finder_group_id: gf_changed.then_some(groups.group_finder_group_id),
+                group_finder_creator: gf_changed.then_some(groups.group_finder_creator),
                 create_source: fields.and_then(|fields| fields.create_source),
                 inbound_invites: Some(FullList {
                     version: Some(version),
@@ -417,6 +428,10 @@ impl SocialWorld {
         GroupsView {
             group,
             raid: self.raid_fields(character),
+            group_finder_group_id: self
+                .group_finder_lobby_of(character)
+                .map_or(NO_ID, |id| *id.as_bytes()),
+            group_finder_creator: self.is_group_finder_creator(character),
             inbound,
             outbound: pick(false),
         }

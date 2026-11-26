@@ -88,6 +88,16 @@ pub enum MatchFlow {
 pub const CATACOMBS_TEAMS: u32 = 1;
 /// Healers a catacombs team takes at most (`MatchmakingMaxHealers` 1 of the `Catacombs` row).
 pub const CATACOMBS_MAX_HEALERS: usize = 1;
+/// The game mode id of the random regular expedition queue (`6322` activity type 7, CRC
+/// `0x3ffa_1f90` `"Dungeon"` in `ledger-626852fecd022451`).
+pub const RANDOM_DUNGEON_GAME_MODE: &str = "Dungeon";
+/// Players of a random regular expedition party (Observed: `match_size = 5`, `desired = 5` in
+/// `ledger-626852fecd022451` 398.635 s).
+pub const RANDOM_DUNGEON_PLAYERS: u32 = 5;
+/// Teams of a random regular expedition party.
+pub const RANDOM_DUNGEON_TEAMS: u32 = 1;
+/// Healers a random regular expedition party takes at most.
+pub const RANDOM_DUNGEON_MAX_HEALERS: usize = 1;
 
 /// The rules of the queue of one game mode, from the configuration.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -160,6 +170,20 @@ impl MatchSettings {
             max_healers_per_team: CATACOMBS_MAX_HEALERS,
         }
     }
+
+    /// The random regular expedition queue's rules (`6322` activity type 7): one party of
+    /// `match_size` (5 in retail), every player accepts before the expedition opens (Observed:
+    /// `ledger-626852fecd022451` 398.635 s to 418.133 s).
+    pub const fn random_dungeon(match_size: u32, accept_timeout: Duration) -> Self {
+        Self {
+            match_size,
+            teams: RANDOM_DUNGEON_TEAMS,
+            fill_wait: None,
+            accept_timeout,
+            flow: MatchFlow::AllAccept,
+            max_healers_per_team: RANDOM_DUNGEON_MAX_HEALERS,
+        }
+    }
 }
 
 /// The rules of every game mode of the queue.
@@ -173,6 +197,8 @@ pub struct QueueRules {
     pub capture_the_flag: MatchSettings,
     /// The catacombs.
     pub catacombs: MatchSettings,
+    /// Random regular expeditions (`6322`).
+    pub random_dungeon: MatchSettings,
 }
 
 impl QueueRules {
@@ -182,6 +208,7 @@ impl QueueRules {
             OUTPOST_RUSH_GAME_MODE => &self.outpost_rush,
             CAPTURE_THE_FLAG_GAME_MODE => &self.capture_the_flag,
             CATACOMBS_GAME_MODE => &self.catacombs,
+            RANDOM_DUNGEON_GAME_MODE => &self.random_dungeon,
             _ => &self.arena,
         }
     }
@@ -731,6 +758,7 @@ mod tests {
             },
             capture_the_flag: MatchSettings::capture_the_flag(SMALL_FLAG, WINDOW),
             catacombs: MatchSettings::catacombs(WINDOW, FILL_WAIT),
+            random_dungeon: MatchSettings::random_dungeon(RANDOM_DUNGEON_PLAYERS, WINDOW),
         }
     }
 
@@ -1141,5 +1169,58 @@ mod tests {
             "the first healer's team takes the DPS player, the second healer plays alone: {late:?}"
         );
         assert_eq!(queue.queued(), 0);
+    }
+
+    #[test]
+    fn a_random_dungeon_forms_a_five_player_party_and_opens_after_all_accept() {
+        let mut queue = Matchmaker::default();
+        for n in 1..=5 {
+            queue.join(QueueJoin {
+                character: Uuid::from_u128(n),
+                sim: sim(),
+                group: None,
+                role: if n == 1 { HEALER_ROLE } else { DPS_ROLE },
+                game_mode: RANDOM_DUNGEON_GAME_MODE.to_owned(),
+                level: "nw_dungeon_windsward_00".to_owned(),
+                fill: true,
+            });
+        }
+        let popped = queue.tick(&THREE_VS_THREE, NOW_MS, ids());
+        let match_id = popped
+            .iter()
+            .find_map(|outcome| match outcome {
+                Outcome::News {
+                    news:
+                        QueueNews {
+                            kind: QueueNewsKind::Popped { match_id, size },
+                            ..
+                        },
+                    ..
+                } => {
+                    assert_eq!(*size, RANDOM_DUNGEON_PLAYERS);
+                    Some(*match_id)
+                }
+                _ => None,
+            })
+            .expect("random dungeon popped");
+        assert_eq!(popped.len(), 5, "all five players receive the pop");
+        for n in 1..=4 {
+            let outcomes = queue.accept(Uuid::from_u128(n), match_id);
+            assert!(
+                !outcomes.iter().any(|o| matches!(o, Outcome::Open(_))),
+                "waits until all five accept"
+            );
+        }
+        let final_accept = queue.accept(Uuid::from_u128(5), match_id);
+        let opening = final_accept
+            .iter()
+            .find_map(|o| match o {
+                Outcome::Open(opening) => Some(opening),
+                Outcome::News { .. } => None,
+            })
+            .expect("opens after fifth accept");
+        assert_eq!(opening.game_mode, RANDOM_DUNGEON_GAME_MODE);
+        assert_eq!(opening.level, "nw_dungeon_windsward_00");
+        assert_eq!(opening.members.len(), 5);
     }
 }

@@ -58,6 +58,8 @@ pub const MATCHMAKING_LOGIN_CONFIRMED_TYPE_INDEX: u64 = 5450;
 pub const MATCHMAKING_LOGIN_REQUESTED_TYPE_INDEX: u64 = 5449;
 /// Type index of `GameModeParticipantComponentServerFacet_RequestJoinQueueForActivities`.
 pub const JOIN_QUEUE_FOR_ACTIVITIES_TYPE_INDEX: u64 = 6254;
+/// Type index of `GameModeParticipantComponentServerFacet_RequestJoinQueueForRandomActivities`.
+pub const JOIN_QUEUE_FOR_RANDOM_ACTIVITIES_TYPE_INDEX: u64 = 6322;
 /// Type index of `GameModeParticipantComponentClientFacet_OnStartCutsceneWithName`.
 pub const START_CUTSCENE_WITH_NAME_TYPE_INDEX: u64 = 6969;
 /// Type index of `GameModeParticipantComponentClientFacet_OnStopCutsceneWithName`.
@@ -95,6 +97,17 @@ pub const CAPTURE_THE_FLAG_ACTIVITY: u16 = 0x3016;
 /// The 6254 activity of the catacombs (Observed: `CATACOMBS2` 4.546 s, `CATACOMBS6` 6.734 s and
 /// three Hive catacombs ledgers).
 pub const CATACOMBS_ACTIVITY: u16 = 0x0c16;
+/// The 6322 / 6295 / 3312 activity type of a random regular expedition queue (Observed:
+/// `ledger-626852fecd022451` 261.870 s `6322` `07 00 01`, `6295` activity type `0x07`, `3312`
+/// `matchmakingServiceActivity` `7` with mode CRC `0x3ffa_1f90` `"Dungeon"`).
+pub const RANDOM_DUNGEON_ACTIVITY_TYPE: u8 = 7;
+/// The 6295 activity type of a direct 6254 queue join (Observed: `0x16` in every 6254 -> 6295).
+pub const DIRECT_ACTIVITY_TYPE: u8 = 0x16;
+/// The 12 regular expedition activity ids sent in `6295` for a random regular expedition queue
+/// (Observed: `ledger-626852fecd022451` 261.898 s).
+pub const RANDOM_REGULAR_EXPEDITION_ACTIVITIES: [u8; 12] = [
+    0x0d, 0x15, 0x29, 0x03, 0x07, 0x23, 0x34, 0x1a, 0x11, 0x49, 0x51, 0x43,
+];
 /// The hex digits of each hyphen-separated group of a UUID text.
 const UUID_GROUP_DIGITS: [usize; 5] = [8, 4, 4, 4, 12];
 /// The separator of a UUID text.
@@ -169,6 +182,18 @@ pub enum GameModeClientMsg {
         header: FacetHeader,
         /// The ticked activities.
         activities: Vec<QueueActivity>,
+    },
+    /// 6322: join the queue for a random activity (Observed: `ledger-626852fecd022451` 261.870 s
+    /// `07 00 01` for a random regular expedition with fill).
+    JoinQueueForRandomActivities {
+        /// The header.
+        header: FacetHeader,
+        /// The random activity type (`7` = random regular expedition).
+        activity_type: u8,
+        /// The difficulty (`0` = regular).
+        difficulty: u8,
+        /// Whether to fill the group with other queued players.
+        fill: bool,
     },
     /// 6824: the player readied up (or unreadied) in game mode `game_mode`.
     SetReadiedUpStatus {
@@ -266,6 +291,14 @@ impl GameModeClientMsg {
                     .collect::<Result<_, MessageError>>()?;
                 Ok(Self::JoinQueueForActivities { header, activities })
             }),
+            JOIN_QUEUE_FOR_RANDOM_ACTIVITIES_TYPE_INDEX => read(|header, reader| {
+                Ok(Self::JoinQueueForRandomActivities {
+                    header,
+                    activity_type: reader.u8()?,
+                    difficulty: reader.u8()?,
+                    fill: reader.boolean()?,
+                })
+            }),
             SET_READIED_UP_STATUS_TYPE_INDEX => read(|header, reader| {
                 Ok(Self::SetReadiedUpStatus {
                     header,
@@ -309,6 +342,9 @@ impl GameModeClientMsg {
             Self::MatchmakingLoginConfirmed { .. } => MATCHMAKING_LOGIN_CONFIRMED_TYPE_INDEX,
             Self::CancelRoleSelection { .. } => CANCEL_ROLE_SELECTION_TYPE_INDEX,
             Self::JoinQueueForActivities { .. } => JOIN_QUEUE_FOR_ACTIVITIES_TYPE_INDEX,
+            Self::JoinQueueForRandomActivities { .. } => {
+                JOIN_QUEUE_FOR_RANDOM_ACTIVITIES_TYPE_INDEX
+            }
             Self::SetReadiedUpStatus { .. } => SET_READIED_UP_STATUS_TYPE_INDEX,
             Self::LeaveQueueForGameMode { .. } => LEAVE_QUEUE_FOR_GAME_MODE_TYPE_INDEX,
             Self::LeaveGameMode { .. } => LEAVE_GAME_MODE_TYPE_INDEX,
@@ -326,6 +362,7 @@ impl GameModeClientMsg {
             | Self::MatchmakingLoginConfirmed { header }
             | Self::CancelRoleSelection { header }
             | Self::JoinQueueForActivities { header, .. }
+            | Self::JoinQueueForRandomActivities { header, .. }
             | Self::SetReadiedUpStatus { header, .. }
             | Self::LeaveQueueForGameMode { header, .. }
             | Self::LeaveGameMode { header, .. }
@@ -370,6 +407,14 @@ impl GameModeClientMsg {
                         .u8(activity.flag);
                 }
             }
+            Self::JoinQueueForRandomActivities {
+                activity_type,
+                difficulty,
+                fill,
+                ..
+            } => {
+                writer.u8(*activity_type).u8(*difficulty).boolean(*fill);
+            }
             Self::SetReadiedUpStatus {
                 game_mode, ready, ..
             } => {
@@ -404,16 +449,24 @@ pub enum GameModeServerMsg {
         /// The header.
         header: FacetHeader,
     },
-    /// 6295: open the role picking screen for this activity.
+    /// 6295: open the role picking screen for these activities.
+    ///
+    /// Wire layout (Observed in both direct 6254 joins like `01 33 16 00 00` and the random
+    /// regular expedition join of `ledger-626852fecd022451` 261.898 s
+    /// `0c 0d 15 29 03 07 23 34 1a 11 49 51 43 07 01 01`): `u8` count + `count` activity bytes,
+    /// `activity_type` (`0x16` direct, `0x07` random regular expedition), `is_random` bool, `fill`
+    /// bool.
     StartMatchmakingRoleSelection {
         /// The header.
         header: FacetHeader,
-        /// The first byte (1 in retail; meaning Unknown).
-        flag: u8,
-        /// The activity, as in the 6254 it follows.
-        activity: u16,
-        /// A value of Unknown meaning (0 in retail).
-        extra: u16,
+        /// The activity ids (`[high_byte]` for direct 6254; 12 regular expeditions for random).
+        activities: Vec<u8>,
+        /// The activity type (`0x16` for direct 6254, `0x07` for random regular expedition).
+        activity_type: u8,
+        /// Whether this is a random activity queue (`false` for 6254, `true` for 6322).
+        is_random: bool,
+        /// Whether to fill the group with other queued players.
+        fill: bool,
     },
     /// 6296: the role picking screen closed (the answer to 6297).
     RoleSelectionCanceled {
@@ -454,6 +507,20 @@ pub enum GameModeServerMsg {
 }
 
 impl GameModeServerMsg {
+    /// Builds a direct (6254) `StartMatchmakingRoleSelection` (`6295`) from the 6254 `activity`
+    /// and `extra` words (wire-identical to the legacy `01 <activity:u16> <extra:u16>`).
+    pub fn direct_role_selection(header: FacetHeader, activity: u16, extra: u16) -> Self {
+        let [activity_id, activity_type] = activity.to_be_bytes();
+        let [random_byte, fill_byte] = extra.to_be_bytes();
+        Self::StartMatchmakingRoleSelection {
+            header,
+            activities: vec![activity_id],
+            activity_type,
+            is_random: random_byte != 0,
+            fill: fill_byte != 0,
+        }
+    }
+
     /// Whether `type_index` is a matchmaking push of the server.
     pub const fn is_type(type_index: u64) -> bool {
         matches!(
@@ -516,12 +583,20 @@ impl GameModeServerMsg {
                 reader.bytes(MATCH_CANCELLED_LEN)?;
                 Self::MatchCancelled { header }
             }
-            START_MATCHMAKING_ROLE_SELECTION_TYPE_INDEX => Self::StartMatchmakingRoleSelection {
-                header,
-                flag: reader.u8()?,
-                activity: reader.u16()?,
-                extra: reader.u16()?,
-            },
+            START_MATCHMAKING_ROLE_SELECTION_TYPE_INDEX => {
+                let count = usize::from(reader.u8()?);
+                let activities = reader.bytes(count)?.to_vec();
+                let activity_type = reader.u8()?;
+                let is_random = reader.boolean()?;
+                let fill = reader.boolean()?;
+                Self::StartMatchmakingRoleSelection {
+                    header,
+                    activities,
+                    activity_type,
+                    is_random,
+                    fill,
+                }
+            }
             GAME_MODE_PLAYER_REMOVED_TYPE_INDEX => Self::GameModePlayerRemoved {
                 header,
                 game_mode: reader.u32()?,
@@ -567,12 +642,23 @@ impl GameModeServerMsg {
                 writer.bytes(&[0; MATCH_CANCELLED_LEN]);
             }
             Self::StartMatchmakingRoleSelection {
-                flag,
-                activity,
-                extra,
+                activities,
+                activity_type,
+                is_random,
+                fill,
                 ..
             } => {
-                writer.u8(*flag).u16(*activity).u16(*extra);
+                let count =
+                    u8::try_from(activities.len()).map_err(|_| MessageError::CountTooLarge {
+                        count: activities.len() as u64,
+                        limit: u64::from(u8::MAX),
+                    })?;
+                writer
+                    .u8(count)
+                    .bytes(activities)
+                    .u8(*activity_type)
+                    .boolean(*is_random)
+                    .boolean(*fill);
             }
             Self::GameModePlayerRemoved {
                 game_mode, player, ..
@@ -750,6 +836,36 @@ mod tests {
                 flag: 1,
             }]
         );
+        let GameModeClientMsg::JoinQueueForRandomActivities {
+            activity_type,
+            difficulty,
+            fill,
+            ..
+        } = client(
+            JOIN_QUEUE_FOR_RANDOM_ACTIVITIES_TYPE_INDEX,
+            &format!("{HEADER}070001"),
+        )
+        else {
+            panic!("a random join queue");
+        };
+        assert_eq!(
+            (activity_type, difficulty, fill),
+            (RANDOM_DUNGEON_ACTIVITY_TYPE, 0, true)
+        );
+        assert_eq!(
+            GameModeClientMsg::JoinQueueForRandomActivities {
+                header: FacetHeader {
+                    target: u64::from_be_bytes(hex(&HEADER[..16]).try_into().unwrap()),
+                    entity: u64::from_be_bytes(hex(&HEADER[16..]).try_into().unwrap()),
+                },
+                activity_type,
+                difficulty,
+                fill,
+            }
+            .encode()
+            .expect("writes"),
+            hex(&format!("{HEADER}070001"))
+        );
         let GameModeClientMsg::AcceptMatch { match_id, flag, .. } = client(
             ACCEPT_MATCHMAKING_MATCH_TYPE_INDEX,
             &format!(
@@ -763,13 +879,18 @@ mod tests {
 
     #[test]
     fn the_retail_server_pushes_read_and_write_back() {
-        let cases: [(u64, &str); 6] = [
+        let cases: [(u64, &str); 7] = [
             (QUEUE_GROUP_REMOVED_TYPE_INDEX, ""),
             // Retail `Hive_3v3_group` 1397.189 s and 1573.390 s.
             (ROLE_SELECTION_CANCELED_TYPE_INDEX, ""),
             (MATCHMAKING_MATCH_CANCELLED_TYPE_INDEX, "000000"),
             (MATCHMAKING_LOGIN_REQUESTED_TYPE_INDEX, ""),
             (START_MATCHMAKING_ROLE_SELECTION_TYPE_INDEX, "0131160000"),
+            // Retail `ledger-626852fecd022451` 261.898 s: 12 regular expeditions, random + fill.
+            (
+                START_MATCHMAKING_ROLE_SELECTION_TYPE_INDEX,
+                "0c0d1529030723341a11495143070101",
+            ),
             (
                 GAME_MODE_PLAYER_REMOVED_TYPE_INDEX,
                 "91b99a18053478731ca555476da9a0b79343e3acbe",

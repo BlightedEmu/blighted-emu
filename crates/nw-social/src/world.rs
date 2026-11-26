@@ -237,6 +237,10 @@ pub struct SocialWorld {
     pub(crate) project_starts: HashMap<u64, ProjectStart>,
     /// The town project cancels the database has now, by ticket.
     pub(crate) project_cancels: HashMap<u64, crate::town_projects::PendingCancel>,
+    /// Open Group Finder lobbies by lobby id ([`crate::group_finder`]).
+    pub(crate) group_finder_lobbies: HashMap<Uuid, crate::group_finder::GroupFinderLobby>,
+    /// Characters subscribed to Group Finder application updates (`5355`).
+    pub(crate) group_finder_subscribers: BTreeSet<Uuid>,
 }
 
 impl SocialWorld {
@@ -373,6 +377,8 @@ impl SocialWorld {
             war_requests: HashMap::new(),
             project_starts: HashMap::new(),
             project_cancels: HashMap::new(),
+            group_finder_lobbies: HashMap::new(),
+            group_finder_subscribers: BTreeSet::new(),
         }
     }
 
@@ -555,6 +561,7 @@ impl SocialWorld {
         self.tell_watchers(character, ONLINE_STATE_OFFLINE);
         self.drop_group_invites_of(character);
         self.drop_raid_invites(character, None);
+        self.group_finder_went_offline(character);
         // A players' raid keeps an offline member, as a group does ([`crate::player_raids`]).
         if let Some(raid) = self.people.get(&character).and_then(|person| person.raid)
             && self.player_raid_of(character).is_none()
@@ -619,6 +626,7 @@ impl SocialWorld {
             SocialCall::Chat(call) => self.chat_call(character, call, now_ms),
             SocialCall::Player(call) => self.player_call(character, header, call),
             SocialCall::Group(call) => self.group_call(character, call, now_ms),
+            SocialCall::GroupFinder(call) => self.group_finder_call(character, call),
             SocialCall::Guild(call) => self.guild_call(character, header, call, now_ms),
             SocialCall::Voice(call) => self.voice_call(character, header, call, now_ms),
             SocialCall::War(call) => self.war_call(character, call),

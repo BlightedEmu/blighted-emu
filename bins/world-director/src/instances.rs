@@ -787,6 +787,10 @@ mod tests {
                     Duration::from_secs(90),
                     Duration::from_secs(60),
                 ),
+                random_dungeon: crate::matchmaking::MatchSettings::random_dungeon(
+                    5,
+                    Duration::from_secs(45),
+                ),
             },
             war_forts: nw_content::war_forts::WarForts::default(),
             invasion_territories: std::collections::BTreeSet::new(),

@@ -175,6 +175,10 @@ fn instance_settings(config: &InstancesConfig, war_forts: WarForts) -> InstanceS
                 Duration::from_millis(config.catacombs.accept_timeout_ms),
                 Duration::from_millis(config.catacombs.fill_wait_ms),
             ),
+            random_dungeon: MatchSettings::random_dungeon(
+                config.random_dungeon.match_size,
+                Duration::from_millis(config.random_dungeon.accept_timeout_ms),
+            ),
         },
         war_forts,
         invasion_territories: std::collections::BTreeSet::new(),
