@@ -6161,6 +6161,91 @@ mod retail_tests {
         assert!(lost <= MAY_LOSE, "{lost} of {MOBS}");
     }
 
+    /// Mobs whose behavior trees Server.pak lacked (spiders, plague rats, werebeasts, Upyr,
+    /// Inquisitors) receive sibling or grid-built stand-in trees in `ai-data.bin`, chase a near
+    /// player and attack with their own CAGE grid actions; the three FTUE tutorial slices keep no
+    /// tree so the tutorial keeps its measured `ChaseBrain` script.
+    #[test]
+    fn stand_in_mobs_chase_and_attack_with_their_own_grids() {
+        const PLAYER_DIST_M: f32 = 8.0;
+        const FIGHT_MS: u64 = 12_000;
+        const FIGHT_SLICES: [&str; 8] = [
+            "slices/characters/spider_melee.dynamicslice",
+            "slices/characters/spider_ranged.dynamicslice",
+            "slices/characters/disabledgatherablevariants/wildlife_rat_plaguerat_nogatherable.dynamicslice",
+            "slices/characters/werewolf.dynamicslice",
+            "slices/characters/wereraven.dynamicslice",
+            "slices/characters/werebear.dynamicslice",
+            "slices/characters/upyr_thrall_grunt.dynamicslice",
+            "slices/characters/inquisitor_cleric.dynamicslice",
+        ];
+        const FTUE_SLICES: [&str; 3] = [
+            "slices/characters/ftue_corrupted/corrupted_sailor_zone3_club.dynamicslice",
+            "slices/characters/ftue_legion/corrupted_legion_ftue_legionnaire_noshield_male.dynamicslice",
+            "slices/characters/namedcharacters/quests/ftue_v2_thorpe.dynamicslice",
+        ];
+
+        let data = retail_data();
+        let ai = MobAi::new(data, AiRates::default(), LookAssets::new());
+        for ftue in FTUE_SLICES {
+            if let Some(index) = ai
+                .data()
+                .archetypes
+                .iter()
+                .position(|arch| ai.data().name(arch.slice) == ftue)
+            {
+                assert!(
+                    !ai.has_tree(index as u32),
+                    "FTUE slice {ftue} must stay unbound so ChaseBrain runs"
+                );
+            }
+        }
+
+        for slice in FIGHT_SLICES {
+            let creature = ai
+                .data()
+                .creatures
+                .iter()
+                .find(|row| {
+                    ai.data()
+                        .name(ai.data().archetypes[row.archetype as usize].slice)
+                        == slice
+                })
+                .unwrap_or_else(|| panic!("missing creature for {slice}"));
+            assert!(
+                ai.has_tree(creature.archetype),
+                "{slice} must have a stand-in tree"
+            );
+            let mut mobs = retail_mobs(
+                vec![spawn_at(SPAWN_X, slice, TEST_LEVEL)],
+                &[(slice, creature.asset)],
+            );
+            let start = at(&mobs, 0);
+            let player = player_at(SPAWN_X + PLAYER_DIST_M);
+            let mut moved = false;
+            let mut acted = false;
+            for now in (0..FIGHT_MS).step_by(TICK_MS as usize) {
+                let intents = mobs.tick(&[player], now, &Flat, 1);
+                let pos = at(&mobs, 0);
+                if (pos.x - start.x).hypot(pos.y - start.y) > 0.1 {
+                    moved = true;
+                }
+                if !intents.is_empty() || !mobs.take_casts().is_empty() {
+                    acted = true;
+                }
+            }
+            assert!(
+                moved || acted,
+                "{slice}: stand-in mob neither moved nor attacked in {FIGHT_MS} ms"
+            );
+            assert!(
+                acted,
+                "{slice}: stand-in mob moved={moved} but never struck or cast in {FIGHT_MS} ms (final pos {:?})",
+                at(&mobs, 0)
+            );
+        }
+    }
+
     /// The rows of the scale test start here.
     const ROW_Y_OFFSET: f32 = 1_000.0;
 }

@@ -401,6 +401,76 @@ impl TreeDecoder {
         Ok(index)
     }
 
+    /// The index and root node of a tree already added at lower-case `path`.
+    pub fn tree_by_path(&self, path: &str) -> Option<(u32, Option<NodeId>)> {
+        let lower = path.to_lowercase();
+        let wanted = *self.name_index.get(&lower)?;
+        self.trees.iter().enumerate().find_map(|(index, tree)| {
+            (tree.path == wanted)
+                .then(|| u32::try_from(index).ok().map(|idx| (idx, tree.root)))
+                .flatten()
+        })
+    }
+
+    /// Interns `ids` in the shared child-id table and returns its slice descriptor.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DecodeError::Full`] when the table cannot hold more ids.
+    pub fn intern_children(&mut self, ids: Vec<NodeId>) -> Result<Children, DecodeError> {
+        let count = u32::try_from(ids.len()).map_err(|_| DecodeError::Full)?;
+        let first = match self.child_index.get(&ids) {
+            Some(first) => *first,
+            None => {
+                let first = u32::try_from(self.child_ids.len()).map_err(|_| DecodeError::Full)?;
+                self.child_ids.extend_from_slice(&ids);
+                self.child_index.insert(ids, first);
+                first
+            }
+        };
+        Ok(Children { first, count })
+    }
+
+    /// Interns `node` in the shared node arena and returns its id.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DecodeError::Full`] when the arena cannot hold more nodes.
+    pub fn intern_node(&mut self, node: Node) -> Result<NodeId, DecodeError> {
+        let bytes = postcard::to_allocvec(&node).map_err(|_| DecodeError::Full)?;
+        let id = match self.node_index.get(&bytes) {
+            Some(id) => *id,
+            None => {
+                let id = NodeId::try_from(self.nodes.len()).map_err(|_| DecodeError::Full)?;
+                self.nodes.push(node);
+                self.node_index.insert(bytes, id);
+                id
+            }
+        };
+        Ok(id)
+    }
+
+    /// Adds a programmatically built tree at `path` with root `root` and returns its index.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DecodeError::Full`] when the tree table is full.
+    pub fn add_built_tree(
+        &mut self,
+        path: &str,
+        root: NodeId,
+        expanded_nodes: u32,
+    ) -> Result<u32, DecodeError> {
+        let path = self.intern(&path.to_lowercase());
+        let index = u32::try_from(self.trees.len()).map_err(|_| DecodeError::Full)?;
+        self.trees.push(TreeAsset {
+            path,
+            root: Some(root),
+            expanded_nodes,
+        });
+        Ok(index)
+    }
+
     /// The literal of an element outside a tree (a slice field): a primitive, or a
     /// `BehaviorParameter` or `AZStd::any` that holds one.
     ///
@@ -1048,17 +1118,7 @@ impl TreeDecoder {
                 ids.push(id);
             }
         }
-        let count = u32::try_from(ids.len()).map_err(|_| DecodeError::Full)?;
-        let first = match self.child_index.get(&ids) {
-            Some(first) => *first,
-            None => {
-                let first = u32::try_from(self.child_ids.len()).map_err(|_| DecodeError::Full)?;
-                self.child_ids.extend_from_slice(&ids);
-                self.child_index.insert(ids, first);
-                first
-            }
-        };
-        Ok(Children { first, count })
+        self.intern_children(ids)
     }
 
     /// A node class element.
@@ -1072,22 +1132,12 @@ impl TreeDecoder {
         let mut expanded = 1;
         let kind = self.kind(class, &mut fields, &mut expanded)?;
         fields.finish()?;
-        let node = Node {
+        let id = self.intern_node(Node {
             name,
             utility,
             interruptable,
             kind,
-        };
-        let bytes = postcard::to_allocvec(&node).map_err(|_| DecodeError::Full)?;
-        let id = match self.node_index.get(&bytes) {
-            Some(id) => *id,
-            None => {
-                let id = NodeId::try_from(self.nodes.len()).map_err(|_| DecodeError::Full)?;
-                self.nodes.push(node);
-                self.node_index.insert(bytes, id);
-                id
-            }
-        };
+        })?;
         Ok(Decoded {
             id: Some(id),
             expanded,

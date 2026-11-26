@@ -1723,7 +1723,11 @@
               "proof": "tests"
             },
             {
-              "check": "Mobs whose behaviour tree is not in Server.pak (spiders, plague rats, werebeasts, Upyr thralls, Inquisitors and more) still stand still; retail runs them as normal fighters, so their trees must come from a related tree or from the captures.",
+              "check": "Mobs whose behaviour tree Server.pak lacks (spiders, plague rats, werebeasts, Upyr thralls, Inquisitors, ghastly snipers, bloodbeasts, feral ghouls, undead naga and more) get sibling trees from Server.pak or stand-in trees built from `baseai` sub-trees and their own CAGE grid attacks (2026-11-26, tests only: 960 of 986 archetypes have a tree; sim test checks spiders, plague rat, werewolf, wereraven, werebear, Upyr grunt and Inquisitor cleric chasing and attacking; the three FTUE tutorial slices stay on their measured script). Not checked live.",
+              "proof": "tests"
+            },
+            {
+              "check": "Two remaining mob trees (`trial_quest_dracula_boss_lillith_base_overrides`, `undead_base_behavior_cryptkeeper`) and 21 encounter managers, hazards and relics have no stand-in tree yet.",
               "proof": "none"
             },
             {
@@ -4558,6 +4562,7 @@
     "**Content folder layout (2026-11-16):** log in and play on the game VM, and run one admin site Apply with a design file on the new layout."
   ],
   "done": [
+    "Mobs without a Server.pak behaviour tree (2026-11-26, tests only): `content-tool ai-data` now binds sibling Server.pak trees (plague rats, fox, lion diver, catacombs and solo bosses) and builds stand-in trees from `baseai` sub-trees and each creature's own CAGE grid attacks for spiders, werebeasts, Upyr, Inquisitors, feral ghouls, bloodbeasts and more (960 of 986 archetypes now have a tree). Sim test proves spiders, plague rats, werebeasts, Upyr and Inquisitors chase and attack; the three FTUE tutorial mobs stay on their measured script.",
     "Bots play the whole main story (2026-11-25): one bot ended 124 of the 129 list quests (the 5 others are twins of other character kinds), all 12 expeditions end, 12 story trials end, a raid of 10 kills its first boss, and elite chests open in four zones.",
     "PvP bots (2026-11-25, bots): a new `arena` bot run queues bots for the arena as a client does and fights to the match end: 13 1v1 matches and 22 3v3 matches, plus 20 duels. Two server faults found and fixed: the AFK rule removed players at a round start with no warning, and the director could stop an instance sim that had just got a match.",
     "Account removal (2026-11-24, tests): `edge-http delete-account --account <name> --confirm <name>` removes an account with its characters and all they own, in every world and in the global database. Before, the only way was a set of hand-written database deletes.",
