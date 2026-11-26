@@ -43,6 +43,13 @@ use super::{MESSAGE_CHANNEL, Outgoing, Player, SimWorld, gather_answer};
 /// and 8,005 ms after the 5747 in the Mount-quest capture, with 3,000 ms summons; 7,843 and
 /// 7,875 ms with 1,500 ms summons in a capture whose clock ran 150 ms behind).
 const SUMMON_AUTHORIZATION_MS: u64 = 8_000;
+/// Why a mount choice is refused: the mount id is not in the game data.
+const NO_SUCH_MOUNT: &str = "no such mount";
+/// Why a mount choice is refused: the player holds neither its achievement nor its store
+/// entitlement.
+const NOT_OWNED: &str = "the player does not own the mount";
+/// Why a mount choice is refused: the achievement of its mount type is not set.
+const TYPE_LOCKED: &str = "its mount type is not unlocked";
 /// The dash starts only with this much mount stamina (`playeractions_mount.actionlist`
 /// `MountDash`: `IfMountStamina GreaterThanOrEqual 15`).
 const DASH_MIN_STAMINA: f32 = 15.0;
@@ -945,6 +952,19 @@ impl SimWorld {
         player: &Player,
         mount: &'a MountRule,
     ) -> Option<(&'a MountRule, &'a MountTypeRule)> {
+        self.mount_use(player, mount).ok()
+    }
+
+    /// [`Self::usable`], or why `player` cannot use `mount`: [`NOT_OWNED`] or [`TYPE_LOCKED`].
+    /// The type rule is the game data's: a mount type names the achievement that unlocks it
+    /// (the lion's `MountType_Unlock_Sabretooth`, which only a quest, a season reward or a
+    /// backstory gives), and a store mount is one mount of its type. No capture shows a store
+    /// mount of a locked type chosen (Unknown).
+    fn mount_use<'a>(
+        &'a self,
+        player: &Player,
+        mount: &'a MountRule,
+    ) -> Result<(&'a MountRule, &'a MountTypeRule), &'static str> {
         let rules = &self.achievement_rules;
         let by_achievement = mount
             .required_achievement
@@ -956,13 +976,17 @@ impl SimWorld {
                 .store
                 .unlock_of(&mount.id)
                 .is_some_and(|store| player.entitlements.contains(&store.unlock.entitlement));
-        let owned = by_achievement || bought;
-        let mount_type = self.content.mounts.mount_type(mount)?;
-        (owned
-            && player
-                .flow
-                .has_achievement(rules, &mount_type.required_achievement))
-        .then_some((mount, mount_type))
+        if !(by_achievement || bought) {
+            return Err(NOT_OWNED);
+        }
+        let mount_type = self.content.mounts.mount_type(mount).ok_or(TYPE_LOCKED)?;
+        if !player
+            .flow
+            .has_achievement(rules, &mount_type.required_achievement)
+        {
+            return Err(TYPE_LOCKED);
+        }
+        Ok((mount, mount_type))
     }
 
     /// The summon key of player `entity` at `now_ms` (retail Mount-quest capture: 5747 40 ms
@@ -1199,17 +1223,24 @@ impl SimWorld {
     /// Player `entity` chooses `mount_id` (5619) at `now_ms`, when it can use it: a summon ends
     /// and a rider gets off (`MountChanged`).
     fn change_mount(&mut self, entity: Entity, mount_id: u32, now_ms: u64) {
-        let usable = self.world.get::<Player>(entity).is_some_and(|player| {
-            self.content
+        let refused = self.world.get::<Player>(entity).map(|player| {
+            let choice = self
+                .content
                 .mounts
                 .mount(mount_id)
-                .and_then(|mount| self.usable(player, mount))
-                .is_some()
+                .ok_or(NO_SUCH_MOUNT)
+                .and_then(|mount| self.mount_use(player, mount));
+            (player.number, choice.err())
         });
-        if !usable {
-            tracing::debug!(mount_id, "change to a mount the player cannot use");
+        let Some((player, None)) = refused else {
+            // A choice with no effect shows nothing in the game: the log says why (a player's
+            // report of 2026-11-25: a bought lion did not equip).
+            if let Some((player, Some(reason))) = refused {
+                tracing::info!(player, mount_id, reason, "mount choice refused");
+            }
             return;
-        }
+        };
+        tracing::debug!(player, mount_id, "mount chosen");
         self.end_mount_for(
             entity,
             SummonCancelReason::PlayerCancelled,

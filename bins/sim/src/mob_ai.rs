@@ -55,7 +55,7 @@ use nw_ai::node::{
 };
 use nw_ai::rng::Rng48;
 use nw_ai::value::{Blackboard, KeyId, NameId, Param, Value};
-use nw_content::combat::MobGuard;
+use nw_content::combat::{MobGuard, PLAIN_SCALE};
 use nw_content::container::ContainerError;
 use nw_content::layout::ContentLayout;
 use nw_content::mob_prefabs::ASSET_ID_LEN;
@@ -83,6 +83,20 @@ pub const MAX_STEP_DOWN_M: f32 = 3.0;
 /// them at -113 and -115 deg, out of their cone of 90 deg to each side; the client default is
 /// 2.5 m and the server profile is Unknown).
 pub(crate) const IMMEDIATE_VICINITY_M: f32 = 3.8;
+/// A mob that sees hears a player who runs this near, at any bearing (Inferred value: the
+/// perception profile's `m_radiusOfHearing` is in no file we hold). Retail, 8 ledgers of the
+/// starting zone, alert starts with the player at 50 to 110 deg off the mob's facing and
+/// moving at 2 m/s or more: 38, at a median of 6.06 m; the mobs note of 2026-10-31: two
+/// sailors alerted with a player running in from behind at 5.9 and 7.2 m, and a player who
+/// stood for up to 2 s at 4.9 to 6.6 m behind them caused no alert. Live 2026-11-26 01:49: a
+/// grenadier did not notice a player who came to 5.2 m behind it.
+const HEARING_M: f32 = 6.0;
+/// A player this fast is heard, m/s (Inferred: above a walk, below the run of 5 m/s; the retail
+/// alerts above were counted from 2 m/s).
+const HEARD_SPEED_MPS: f32 = 2.0;
+/// The least time between two looks at how far a player moved, ms (our engineering limit: a
+/// speed over a shorter time is a single input step).
+const HEARING_SAMPLE_MS: u64 = 500;
 /// A target this near is reachable whatever the floor check between the two says: the mob
 /// stands at it. Live 2026-11-22 (sim 15:33:03-15:33:10): the encounter dryad of `1434_0103`
 /// fought the bot 0.28 to 1.76 m away while its floor check said unreachable, and
@@ -546,6 +560,29 @@ impl MobAi {
     /// Archetype `archetype`.
     pub fn arch(&self, archetype: u32) -> Option<&Archetype> {
         self.data().archetypes.get(archetype as usize)
+    }
+
+    /// An action of archetype `archetype`'s grid that plays fragment `fragment` and that
+    /// `numbered` accepts, the first by name: the action a mob shows in place of one that the
+    /// client has no number for (`SimWorld`'s mob poses). Inferred: the client plays the
+    /// fragment, and the action's number only names the entry; the knife mob whose run went
+    /// to the unnumbered `Move_Combat_Blocking` shows `Move_Combat` by this rule, as retail
+    /// (`Playthrough_Part_01`, interest 52, record ms 1792338599733: `355/182/45`).
+    pub fn action_of_fragment(
+        &self,
+        archetype: u32,
+        fragment: &str,
+        numbered: impl Fn(&str) -> bool,
+    ) -> Option<&str> {
+        let data = self.data();
+        let grid = data.grids.get(self.arch(archetype)?.grid? as usize)?;
+        grid.actions
+            .iter()
+            .filter_map(|(name, index)| {
+                Some((data.name(*name), data.cage_actions.get(*index as usize)?))
+            })
+            .find(|(name, action)| data.name(action.fragment) == fragment && numbered(name))
+            .map(|(name, _)| name)
     }
 
     /// The config value of `key` of archetype `archetype` as a number.
@@ -1466,6 +1503,10 @@ struct MindState {
     off_map: bool,
     /// Where and since when its motion to a goal makes no way ([`Self::stalled`]).
     stall: Option<(Position, u64)>,
+    /// The size of its model against the slice's own ([`TreeMind::set_scale`]).
+    scale: f32,
+    /// Where and when it last placed each player within [`HEARING_M`] ([`Self::hears`]).
+    heard: Vec<(u64, Position, u64)>,
     reach: Option<ReachCheck>,
     statuses: Vec<NameId>,
     /// While a hit reaction plays: until when.
@@ -1521,6 +1562,8 @@ enum TargetReason {
     Threat,
     /// It saw a player in its ambient vision.
     Sight,
+    /// It heard a player run near it, out of its sight ([`HEARING_M`]).
+    Hearing,
 }
 
 /// An action the engine runs by its activation condition (`Block`, `BlockBroken`,
@@ -1865,6 +1908,39 @@ impl MindState {
         self.path.is_some()
     }
 
+    /// The players of `seen` that the mob at `at` hears at `now_ms`: those within
+    /// [`HEARING_M`] that moved at [`HEARD_SPEED_MPS`] or more since it last placed them, at
+    /// least [`HEARING_SAMPLE_MS`] ago. A player it places for the first time is not heard yet.
+    fn hears(&mut self, at: Position, seen: &[Seen], now_ms: u64) -> Vec<u64> {
+        let near = |player: &&Seen| player.position.horizontal_distance(at) <= HEARING_M;
+        self.heard
+            .retain(|(entity, ..)| seen.iter().filter(near).any(|p| p.entity == *entity));
+        let mut heard = Vec::new();
+        for player in seen.iter().filter(near) {
+            let Some((_, from, since_ms)) = self
+                .heard
+                .iter_mut()
+                .find(|(entity, ..)| *entity == player.entity)
+            else {
+                self.heard.push((player.entity, player.position, now_ms));
+                continue;
+            };
+            let elapsed_ms = now_ms.saturating_sub(*since_ms);
+            if elapsed_ms < HEARING_SAMPLE_MS {
+                continue;
+            }
+            // A time of about half a second.
+            #[allow(clippy::cast_precision_loss, reason = "a time of about half a second")]
+            let speed_mps =
+                from.horizontal_distance(player.position) / (elapsed_ms as f32 / MS_PER_S);
+            if speed_mps >= HEARD_SPEED_MPS {
+                heard.push(player.entity);
+            }
+            (*from, *since_ms) = (player.position, now_ms);
+        }
+        heard
+    }
+
     /// Keeps the mob's place `at` in its trail while it fights (each [`TRAIL_STEP_M`]).
     fn keep_trail(&mut self, ai: &MobAi, at: Position) {
         if self.target.is_none() || self.resetting(ai) {
@@ -2053,23 +2129,32 @@ impl MindState {
             && !passive
             && let Some((angle_deg, distance_m)) = self.vision(ai, false)
         {
-            self.target = seen
+            let heard = self.hears(at, seen, around.now_ms);
+            let yaw = self.yaw;
+            let in_sight = |player: &Seen| {
+                let distance = player.position.horizontal_distance(at);
+                let bearing = yaw_gap(yaw, yaw_toward(at, player.position)).abs();
+                distance <= IMMEDIATE_VICINITY_M
+                    || (distance <= distance_m && bearing.to_degrees() <= angle_deg)
+            };
+            let noticed = seen
                 .iter()
-                .filter(|player| {
-                    let distance = player.position.horizontal_distance(at);
-                    let bearing = yaw_gap(self.yaw, yaw_toward(at, player.position)).abs();
-                    distance <= IMMEDIATE_VICINITY_M
-                        || (distance <= distance_m && bearing.to_degrees() <= angle_deg)
-                })
+                .filter(|player| in_sight(player) || heard.contains(&player.entity))
                 .min_by(|a, b| {
                     let da = a.position.horizontal_distance(at);
                     let db = b.position.horizontal_distance(at);
                     da.total_cmp(&db).then(a.entity.cmp(&b.entity))
+                });
+            self.target = noticed.map(|player| player.entity);
+            self.target_reason = noticed
+                .map(|player| {
+                    if in_sight(player) {
+                        TargetReason::Sight
+                    } else {
+                        TargetReason::Hearing
+                    }
                 })
-                .map(|player| player.entity);
-            if self.target.is_some() {
-                self.target_reason = Some(TargetReason::Sight);
-            }
+                .or(self.target_reason);
         }
         if self.target.is_some() && had.is_none() {
             // The fight takes over from the damage reaction (Inferred).
@@ -2366,7 +2451,7 @@ impl MindState {
                 .variant(&|tag| tags.contains(&tag))?
                 .root_motion
                 .clone()?;
-            Some(RootRun::new(motion, multiplier, now_ms))
+            Some(RootRun::new(motion, multiplier * self.scale, now_ms))
         });
     }
 
@@ -2460,7 +2545,10 @@ impl MindState {
                 at_ms,
                 act: WindowAct::Strike {
                     row,
-                    reach: window_reach(ai, shaped(ai, window, weapon), homing),
+                    reach: scaled(
+                        window_reach(ai, shaped(ai, window, weapon), homing),
+                        self.scale,
+                    ),
                     ranged: None,
                     open_ms,
                 },
@@ -2807,6 +2895,8 @@ impl TreeMind {
                 fitted: false,
                 off_map: false,
                 stall: None,
+                scale: PLAIN_SCALE,
+                heard: Vec::new(),
                 reach: None,
                 // The slice's `m_initialStatusEffects` (`AI_Enable_Stagger`); the cards do
                 // not show them (Observed: no such effect on the heavies' and Seraphim's cards).
@@ -2853,6 +2943,28 @@ impl TreeMind {
     /// It chases `chase_m` from its spawn: the chase distance of a mob whose data gives none.
     pub const fn set_chase_fallback(&mut self, chase_m: f32) {
         self.state.chase_fallback_m = Some(chase_m);
+    }
+
+    /// Its model is `scale` times the size of its slice's (its vitals row's `CharacterScale`).
+    /// The whole body grows with it, so its legs carry it that much farther in a step, its
+    /// fragments move it that much farther, and the shapes on its joints reach that much
+    /// farther: its move speeds, its root motion and the reach of its damage windows are
+    /// multiplied by it.
+    ///
+    /// Observed for the speeds: the first mate of the starting beach has `CharacterScale` 1.45,
+    /// and retail moved it 1.42 times as fast as its navigation configs say (`Strafe` p50 1.77
+    /// m/s against 1.25, 21 state pairs of `newchar-retail-2026-09-18`; patrol `Move` 1.21 m/s
+    /// against 0.85, 324 pairs of that ledger and `Playthrough_Part_01`); a knife mob with
+    /// `CharacterScale` 1.4 ran 7.3 m/s in `Playthrough_Part_01` (interest 52) against the 4.0
+    /// to 5.2 m/s of its config; a grenadier of the beach camp, with no `CharacterScale`,
+    /// walked 2.72 m/s against its 2.75. For the root motion: a javelin thrower of scale 1.15
+    /// dashed back 4.53 m in retail, its clip gives 4.14 m (4.76 scaled; one case). Inferred for
+    /// the reach (the same body): the first mate's slam sphere of radius 1.5 reaches 2.4 m between
+    /// the bodies' middles unscaled and 3.1 m scaled, and the tree he takes the slam from picks
+    /// it up to 3.0 m. Not scaled (Unknown): the capsule's radius, the homing clips' distances,
+    /// a spawn's measured run speed.
+    pub fn set_scale(&mut self, scale: f32) {
+        self.state.scale = scale;
     }
 
     /// It can block with guard `guard` (its mob type's): its stamina starts at the guard's
@@ -3742,6 +3854,7 @@ impl TreeMind {
         config: Option<&NavConfig>,
         view: &View<'_>,
     ) -> Steering {
+        let scale = self.state.scale;
         if let Some(config) = config {
             let run = Some(config.kind) == ai.names.run_config;
             return Steering {
@@ -3749,10 +3862,10 @@ impl TreeMind {
                     .state
                     .run_speed_mps
                     .filter(|_| run)
-                    .unwrap_or(config.max_speed),
-                min_speed_mps: config.min_speed,
-                acceleration_mps2: config.linear_acceleration,
-                deceleration_mps2: config.linear_deceleration,
+                    .unwrap_or(config.max_speed * scale),
+                min_speed_mps: config.min_speed * scale,
+                acceleration_mps2: config.linear_acceleration * scale,
+                deceleration_mps2: config.linear_deceleration * scale,
                 turn_rate_deg_s: config.turn_rate_deg,
                 arrival_m: config.arrival_threshold,
             };
@@ -3773,10 +3886,10 @@ impl TreeMind {
             _ => return STANDING,
         };
         Steering {
-            max_speed_mps: number(&motion.max_speed),
-            min_speed_mps: number(&motion.min_speed),
-            acceleration_mps2: number(&motion.linear_acceleration),
-            deceleration_mps2: number(&motion.linear_deceleration),
+            max_speed_mps: number(&motion.max_speed) * scale,
+            min_speed_mps: number(&motion.min_speed) * scale,
+            acceleration_mps2: number(&motion.linear_acceleration) * scale,
+            deceleration_mps2: number(&motion.linear_deceleration) * scale,
             turn_rate_deg_s: number(turn_rate),
             arrival_m: number(&motion.arrival_threshold),
         }
@@ -4208,6 +4321,15 @@ fn param_of(window: &ProcWindow, name: Option<NameId>) -> Option<NameId> {
         .iter()
         .find(|(known, _)| *known == name)
         .map(|(_, value)| *value)
+}
+
+/// The reach `reach` of a damage window for a model `scale` times its slice's size
+/// ([`TreeMind::set_scale`]).
+fn scaled(reach: MobReach, scale: f32) -> MobReach {
+    MobReach {
+        reach_m: reach.reach_m * scale,
+        ..reach
+    }
 }
 
 /// How the swing of a damage window reaches (Inferred: the joint the shape hangs on is Unknown
@@ -5781,6 +5903,59 @@ mod tests {
                 .stalled(&ai, &around(STALL_MS), on, Some(goal), true)
         );
         assert_eq!(moving.state.stall, Some((on, STALL_MS)));
+    }
+
+    #[test]
+    fn a_mob_hears_a_player_who_runs_near_it_and_not_one_who_stands_or_is_far() {
+        const RUNNER: u64 = 7;
+        let ai = test_ai(&[]);
+        let mut mind = TreeMind::new(&ai, 0, START, 0.0, 1, None).expect("a tree");
+        let at = |metres: f32| {
+            [Seen {
+                entity: RUNNER,
+                position: east(metres),
+            }]
+        };
+        let near = HEARING_M - 1.0;
+        // The first look places the player; a later look measures how fast it moved.
+        assert!(mind.state.hears(START, &at(near), 0).is_empty());
+        let step_m = HEARD_SPEED_MPS * HEARING_SAMPLE_MS as f32 / MS_PER_S;
+        assert_eq!(
+            mind.state
+                .hears(START, &at(near - step_m), HEARING_SAMPLE_MS),
+            [RUNNER]
+        );
+        assert!(
+            mind.state
+                .hears(START, &at(near - step_m), 2 * HEARING_SAMPLE_MS)
+                .is_empty(),
+            "it stands"
+        );
+        // A runner past the hearing radius is not placed at all.
+        let mut far = TreeMind::new(&ai, 0, START, 0.0, 1, None).expect("a tree");
+        assert!(
+            far.state
+                .hears(START, &at(HEARING_M + step_m + 1.0), 0)
+                .is_empty()
+        );
+        assert!(
+            far.state
+                .hears(START, &at(HEARING_M + 1.0), HEARING_SAMPLE_MS)
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn a_bigger_model_reaches_farther_by_its_scale() {
+        const SCALE: f32 = 1.45;
+        const REACH_M: f32 = 2.0;
+        let reach = MobReach {
+            lunge_max_m: 0.0,
+            lunge_turn_rad: 0.0,
+            reach_m: REACH_M,
+        };
+        assert_eq!(scaled(reach, SCALE).reach_m, REACH_M * SCALE);
+        assert_eq!(scaled(reach, PLAIN_SCALE), reach);
     }
 
     #[test]

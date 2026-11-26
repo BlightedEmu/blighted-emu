@@ -5807,9 +5807,10 @@ impl SimWorld {
 /// numbers of the action it plays in the creature's files (`table`), its tag state, and its
 /// facing once it turned.
 ///
-/// An action or fragment that the creature's files do not number cannot go to the client: the
-/// mob shows its idle ([`mob_timeline`]), and the first time for each mob and action
-/// (`logged`) a debug line says so. Live 2026-11-26 05:28:32 UTC on: the knife priest
+/// An action that the creature's files do not number goes out as a numbered action of the same
+/// fragment ([`crate::mob_ai::MobAi::action_of_fragment`]). With none of those, or with a fragment that has no
+/// number, nothing can go to the client: the mob shows its idle ([`mob_timeline`]), and the
+/// first time for each mob and action (`logged`) a debug line says so. Live 2026-11-26 05:28:32 UTC on: the knife priest
 /// (archetype 932) ran with the unnumbered `Move_Combat_Blocking` and glided in the idle pose
 /// (the grid rule of `content-tool ai-data` now resolves its run to `Move_Combat`).
 fn tree_pose(
@@ -5824,7 +5825,15 @@ fn tree_pose(
         mobs.shown(entity)
             .zip(creature)
             .and_then(|((shown, action, fragment), creature)| {
-                let numbers = creature.fragment(fragment).zip(creature.action(action));
+                // An action without a client number shows as a numbered action of its fragment.
+                let numbered = creature.action(action).or_else(|| {
+                    mobs.ai()
+                        .action_of_fragment(mind.archetype(), fragment, |name| {
+                            creature.action(name).is_some()
+                        })
+                        .and_then(|name| creature.action(name))
+                });
+                let numbers = creature.fragment(fragment).zip(numbered);
                 if numbers.is_none() && logged.insert((entity, shown.action)) {
                     tracing::debug!(
                         mob = entity,

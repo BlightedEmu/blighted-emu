@@ -162,6 +162,14 @@ pub enum AdminAction {
         /// The azoth.
         azoth: u32,
     },
+    /// Gives the player's account Marks of Fortune, the store currency (a negative amount takes
+    /// them; a wallet never goes below 0). The player's client gets the new wallet at once.
+    GiveMarks {
+        /// The player.
+        entity: u64,
+        /// How many Marks of Fortune.
+        amount: i64,
+    },
 }
 
 /// One running event of a sim.

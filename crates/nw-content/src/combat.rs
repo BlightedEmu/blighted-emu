@@ -94,6 +94,9 @@ pub struct MobType {
     pub creature_type: Option<String>,
     /// Its guard, for a type that can block.
     pub guard: Option<MobGuard>,
+    /// Its `CharacterScale`: the size of its model against the slice's own ([`PLAIN_SCALE`]
+    /// without one). 5,620 of the 7,408 rows of build 25810808 set another size (0.15 to 1.9).
+    pub scale: f32,
 }
 
 impl MobType {
@@ -104,8 +107,12 @@ impl MobType {
         damage_mod: PLAIN_MOD,
         creature_type: None,
         guard: None,
+        scale: PLAIN_SCALE,
     };
 }
+
+/// The `CharacterScale` of a row that sets none: the slice's own size.
+pub const PLAIN_SCALE: f32 = 1.0;
 
 /// The guard of a mob type that can block (`VitalsBaseData`; Observed in the rows of build
 /// 25810808: the shield and guard pose kinds that retail showed blocking, `Damned_1H_Swordsman_*`,
@@ -738,6 +745,10 @@ impl CombatSource {
                             .map(|guard| {
                                 guard.in_vitals_categories(row.vitals_categories.as_deref())
                             }),
+                            // A model size of about 1: f32 holds it.
+                            scale: row
+                                .character_scale
+                                .map_or(PLAIN_SCALE, |scale| scale as f32),
                         },
                     )
                 })
@@ -1823,6 +1834,7 @@ mod tests {
             damage_mod: BOAR_DAMAGE_MOD,
             creature_type: Some("Beast".to_owned()),
             guard: None,
+            scale: PLAIN_SCALE,
         }
     }
 

@@ -34,12 +34,12 @@
 use std::collections::BTreeSet;
 
 use bevy_ecs::prelude::Entity;
-use nw_bus::AccountBalances;
+use nw_bus::{AccountBalances, AdminReply};
 use nw_common::time::iso8601_millis;
 use nw_content::store::EntitlementIndexes;
 use nw_db::{
     AccountConsumable, AccountEntitlement, DbError, PgPool, Purchase, Wallet, buy_consumable,
-    buy_entitlement, save_changed_look, use_consumable,
+    buy_entitlement, give_marks, save_changed_look, use_consumable,
 };
 use nw_formats::objectstream::lowercase_crc32;
 use nw_messages::facet::component;
@@ -117,6 +117,12 @@ pub enum GrantKind {
         /// The `StatusID` the token starts.
         effect: String,
     },
+    /// A game master gives the account `amount` Marks of Fortune (a negative amount takes
+    /// them): no store call of the client, so it gets no 5936 or 1285, only its new wallet.
+    Gift {
+        /// How many Marks of Fortune.
+        amount: i64,
+    },
 }
 
 /// A store request that the loop runs against the account store.
@@ -152,6 +158,8 @@ pub enum GrantAnswer {
     Barber(Result<Option<AccountConsumable>, DbError>),
     /// The use of a status effect token: the tokens left, or `None` when the account held none.
     StatusEffectToken(Result<Option<AccountConsumable>, DbError>),
+    /// The gift of Marks of Fortune: the account's wallet after it.
+    Gift(Result<Wallet, DbError>),
 }
 
 impl StoreGrant {
@@ -222,6 +230,9 @@ impl StoreGrant {
             }
             GrantKind::StatusEffectToken { .. } => {
                 GrantAnswer::StatusEffectToken(self.use_token(global).await)
+            }
+            GrantKind::Gift { amount } => {
+                GrantAnswer::Gift(give_marks(global, self.account, *amount).await)
             }
         };
         (self, answer)
@@ -578,6 +589,56 @@ impl SimWorld {
                 self.status_token_used(grant, answer);
                 false
             }
+            GrantAnswer::Gift(answer) => {
+                self.marks_given(grant, answer);
+                false
+            }
+        }
+    }
+
+    /// A game master gives the account of player `entity` `amount` Marks of Fortune
+    /// (`!marks`, the admin action): the loop writes the wallet in the global database, and
+    /// the player's client gets the new wallet when it is saved ([`Self::marks_given`]).
+    /// Before, only `blighted-admin give-marks` gave Marks, in the database alone: a player
+    /// who was online saw them after its next login (live 2026-11-26).
+    pub(super) fn give_marks(&mut self, entity: u64, amount: i64) -> AdminReply {
+        let Some((number, account)) = self
+            .player_by_number(entity)
+            .and_then(|target| self.world.get::<Player>(target))
+            .map(|player| (player.number, player.account))
+        else {
+            return AdminReply::NotMine;
+        };
+        let grant = StoreGrant {
+            number,
+            account,
+            entitlement: String::new(),
+            price: 0,
+            kind: GrantKind::Gift { amount },
+            header: FacetHeader::of(component::ENTITLEMENT, number),
+            request: [0; RAW_ID_LEN],
+            transaction: self.next_transaction(),
+        };
+        self.economy.grants.push(grant);
+        AdminReply::Done
+    }
+
+    /// The loop gave the Marks of Fortune of `grant` (`answer`): the player, if it is still on
+    /// this sim, holds the new wallet and its client gets the entitlement state again.
+    fn marks_given(&mut self, grant: &StoreGrant, answer: Result<Wallet, DbError>) {
+        let wallet = match answer {
+            Ok(wallet) => wallet,
+            Err(error) => {
+                tracing::error!(%error, account = %grant.account, "Marks of Fortune not given");
+                return;
+            }
+        };
+        tracing::info!(account = %grant.account, marks = wallet.marks, "Marks of Fortune given");
+        if let Some(mut player) = self
+            .player_by_number(grant.number)
+            .and_then(|entity| self.world.get_mut::<Player>(entity))
+        {
+            player.wallet_changed(wallet);
         }
     }
 
@@ -846,6 +907,40 @@ mod tests {
         };
         assert!(started.entitlements.is_empty() && !started.done);
         assert_eq!(started.debits, done.debits);
+    }
+
+    #[test]
+    fn marks_given_by_a_game_master_show_in_the_wallet_at_once() {
+        use crate::world::tests::{NOW, SERVER_TIME, admit_at, world_with_spawns};
+
+        const PLAYER: u64 = 7;
+        const OTHER: u64 = 8;
+        const MARKS: i64 = 500;
+        let mut world = world_with_spawns(Vec::new());
+        world
+            .admit(&admit_at(PLAYER, 0.0, true), NOW, SERVER_TIME)
+            .expect("admit");
+        assert_eq!(world.give_marks(OTHER, MARKS), AdminReply::NotMine);
+        assert_eq!(world.give_marks(PLAYER, MARKS), AdminReply::Done);
+        let grants = world.take_store_grants();
+        let [grant] = &grants[..] else {
+            panic!("one grant");
+        };
+        assert_eq!(grant.kind, GrantKind::Gift { amount: MARKS });
+        let entity = world.player_by_number(PLAYER).expect("player");
+        world
+            .world
+            .get_mut::<Player>(entity)
+            .expect("player")
+            .entitlements_changed = false;
+        let wallet = Wallet {
+            marks: MARKS,
+            updated_at_ms: 1,
+        };
+        assert!(!world.store_answered(grant, GrantAnswer::Gift(Ok(wallet))));
+        let player = world.world.get::<Player>(entity).expect("player");
+        assert_eq!(player.balances.marks, MARKS);
+        assert!(player.entitlements_changed, "its client gets the wallet");
     }
 
     #[test]

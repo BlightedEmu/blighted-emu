@@ -899,6 +899,7 @@ impl Mobs {
                 TreeMind::new(&self.ai, archetype, at, 0.0, u64::from(index), overrides)
             })
             .map_or(Mind::Still, |mut mind| {
+                mind.set_scale(kind.scale);
                 if let Some(guard) = kind.guard {
                     mind.set_guard(guard);
                 }

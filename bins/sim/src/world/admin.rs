@@ -104,6 +104,7 @@ impl SimWorld {
             } => self.set_mastery_rank(*entity, mastery.as_deref(), *rank),
             AdminAction::SetCoins { entity, coins } => self.set_coins(*entity, *coins),
             AdminAction::SetAzoth { entity, azoth } => self.set_azoth(*entity, *azoth),
+            AdminAction::GiveMarks { entity, amount } => self.give_marks(*entity, *amount),
             AdminAction::Kick { .. } | AdminAction::KickAccount { .. } => AdminReply::Failed {
                 reason: "a kick is the server loop's".to_owned(),
             },
