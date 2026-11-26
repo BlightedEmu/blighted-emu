@@ -3201,7 +3201,7 @@
               "proof": "tests"
             },
             {
-              "check": "Group finder observed calls and lobby state: 1960/3461 (list), 1147/2010 (get lobby details), 3485 (application accepted), 3245/3475 (decline invite), 5355 (application subscription), 4739 (confirm conversion into a real group), replicated state 1091 codec, and groupFinderGroupId on GroupsState (1994). Still uncaptured in our retail ledgers: 3509, 3510, 3515, 105 and a non-empty 3461 entry.",
+              "check": "Group finder end-to-end: all 19 client calls (3509, 2872, 1683, 1960, 1147, 3510, 3515, 1383, 3513, 1553, 105, 3245, 3518, 3519, 5355, 4723, 4739, 4744, 5463) and server pushes (including binary-verified 3461 list entries and live 5458 lobby counts), replicated 1091 GroupFinderGroupDataComponentReplicatedState entity (asset slices/groups/groupfindergroupgde.dynamicslice) with Slot 3 application replication for creator and 5355 subscribers, groupFinderGroupId on GroupsState (1994), and conversion into a real group.",
               "proof": "tests"
             },
             {

@@ -429,9 +429,12 @@ mod tests {
 
     #[test]
     fn other_types_are_not_social_calls() {
-        assert!(SocialCall::decode(crate::lookups::REQUEST_LOBBY_COUNTS_TYPE_INDEX, &[]).is_none());
+        assert!(
+            SocialCall::decode(crate::game_mode::JOIN_QUEUE_FOR_ACTIVITIES_TYPE_INDEX, &[])
+                .is_none()
+        );
         assert!(!SocialCall::is_call(
-            crate::lookups::REQUEST_LOBBY_COUNTS_TYPE_INDEX
+            crate::game_mode::JOIN_QUEUE_FOR_ACTIVITIES_TYPE_INDEX
         ));
     }
 }

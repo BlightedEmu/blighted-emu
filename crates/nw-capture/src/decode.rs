@@ -336,6 +336,7 @@ fn member_position(state: &MemberState) -> Option<[f32; 3]> {
         | MemberState::Guilds(_)
         | MemberState::Chat(_)
         | MemberState::GroupData(_)
+        | MemberState::GroupFinderData(_)
         | MemberState::RaidData(_)
         | MemberState::WarData(_)
         | MemberState::SiegeWarfareData(_)

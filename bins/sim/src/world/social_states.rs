@@ -8,12 +8,16 @@
 //! the service each change of a player's health and life, which its group shows.
 
 use nw_bus::{
-    GroupEntityDelivery, GroupEntityView, OwnStateDelivery, PlayerVitals, RaidEntityDelivery,
-    SocialDeliveries, SocialInput, SocialStateKind,
+    GroupEntityDelivery, GroupEntityView, GroupFinderEntityDelivery, GroupFinderEntityView,
+    OwnStateDelivery, PlayerVitals, RaidEntityDelivery, SocialDeliveries, SocialInput,
+    SocialStateKind,
 };
 use nw_messages::payload::{BundleGroup, BundleMember, MemberState};
 use nw_messages::social::group_data::{
     FULL_PERCENT, GROUP_DATA_TYPE_INDEX, GroupDataState, group_entity_members,
+};
+use nw_messages::social::group_finder::{
+    GROUP_FINDER_DATA_TYPE_INDEX, GroupFinderGroupDataState, group_finder_entity_members,
 };
 use nw_messages::social::raid_data::{RAID_DATA_TYPE_INDEX, RaidDataState, raid_entity_members};
 use nw_messages::social::states::{
@@ -103,10 +107,55 @@ struct RaidEntities {
     groups: Vec<GroupEntity>,
 }
 
+/// A Group Finder entity (`1091`) of a player on this sim.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct GroupFinderEntity {
+    number: u64,
+    group: Uuid,
+    state: GroupFinderGroupDataState,
+    changed: bool,
+}
+
+impl GroupFinderEntity {
+    fn bundle_group(&mut self, slot: Slot) -> Option<BundleGroup> {
+        if !slot.new && !self.changed {
+            return None;
+        }
+        self.changed = false;
+        Some(BundleGroup {
+            interest: u64::from(slot.interest),
+            members: group_finder_entity_members(
+                *self.group.as_bytes(),
+                self.state.clone(),
+                slot.new,
+            ),
+        })
+    }
+
+    fn update(&mut self, state: GroupFinderGroupDataState) {
+        self.changed |= self.state != state;
+        self.state = state;
+    }
+}
+
+fn group_finder_state_of(
+    character: Uuid,
+    view: &GroupFinderEntityView,
+) -> Option<GroupFinderGroupDataState> {
+    match MemberState::decode(GROUP_FINDER_DATA_TYPE_INDEX, &view.body) {
+        Ok(MemberState::GroupFinderData(state)) => Some(*state),
+        Ok(_) | Err(_) => {
+            tracing::warn!(%character, "group finder entity does not read");
+            None
+        }
+    }
+}
+
 /// A player's social side on this sim.
 #[derive(Debug, Default)]
 pub(super) struct PlayerSocial {
     group_entity: Option<GroupEntity>,
+    group_finder_entity: Option<GroupFinderEntity>,
     raid: Option<RaidEntities>,
     /// Group and raid entities this player had on this sim: the next one gets a new number, so
     /// its client gets a new slot and card.
@@ -123,9 +172,13 @@ impl PlayerSocial {
         self.group_entity.as_ref().map(|entity| entity.number)
     }
 
-    /// The entity numbers of the player's group entity, raid entity and raid group entities.
+    /// The entity numbers of the player's group entity, Group Finder entity, raid entity and raid
+    /// group entities.
     pub(super) fn entity_numbers(&self) -> Vec<u64> {
         let mut numbers: Vec<u64> = self.group_entity_number().into_iter().collect();
+        if let Some(gf) = &self.group_finder_entity {
+            numbers.push(gf.number);
+        }
         if let Some(raid) = &self.raid {
             numbers.push(raid.number);
             numbers.extend(raid.groups.iter().map(|group| group.number));
@@ -168,6 +221,13 @@ impl PlayerSocial {
         {
             return entity.bundle_group(slot);
         }
+        if let Some(entity) = self
+            .group_finder_entity
+            .as_mut()
+            .filter(|entity| entity.number == number)
+        {
+            return entity.bundle_group(slot);
+        }
         let raid = self.raid.as_mut()?;
         if raid.number != number {
             return raid
@@ -203,6 +263,28 @@ impl PlayerSocial {
             _ => {
                 let number = self.next_number();
                 self.group_entity = Some(GroupEntity {
+                    number,
+                    group: view.group,
+                    state,
+                    changed: true,
+                });
+            }
+        }
+    }
+
+    fn set_group_finder_entity(&mut self, delivery: &GroupFinderEntityDelivery) {
+        let Some(view) = &delivery.view else {
+            self.group_finder_entity = None;
+            return;
+        };
+        let Some(state) = group_finder_state_of(delivery.character, view) else {
+            return;
+        };
+        match &mut self.group_finder_entity {
+            Some(entity) if entity.group == view.group => entity.update(state),
+            _ => {
+                let number = self.next_number();
+                self.group_finder_entity = Some(GroupFinderEntity {
                     number,
                     group: view.group,
                     state,
@@ -308,6 +390,14 @@ impl SimWorld {
             };
             if let Some(mut player) = self.world.get_mut::<Player>(entity) {
                 player.social.set_group_entity(delivery);
+            }
+        }
+        for delivery in &deliveries.group_finder_entities {
+            let Some(entity) = self.player_of_character(delivery.character) else {
+                continue;
+            };
+            if let Some(mut player) = self.world.get_mut::<Player>(entity) {
+                player.social.set_group_finder_entity(delivery);
             }
         }
         for delivery in &deliveries.raid_entities {

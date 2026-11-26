@@ -510,6 +510,13 @@ impl Loop {
                         .group_entities
                         .push(delivery);
                 }
+                Effect::GroupFinderEntity { sim, delivery } => {
+                    self.pending
+                        .entry(sim)
+                        .or_default()
+                        .group_finder_entities
+                        .push(delivery);
+                }
                 Effect::RaidEntity { sim, delivery } => {
                     self.pending
                         .entry(sim)

@@ -379,6 +379,24 @@ pub struct GroupEntityDelivery {
     pub view: Option<GroupEntityView>,
 }
 
+/// A player's Group Finder entity (`GroupFinderGroupDataComponentReplicatedState`, class 1091).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GroupFinderEntityView {
+    /// The Group Finder lobby id.
+    pub group: Uuid,
+    /// The encoded state body (`GroupFinderGroupDataComponentReplicatedState`, whole).
+    pub body: Vec<u8>,
+}
+
+/// A player's Group Finder entity: its state now, or none when the player left its listing.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GroupFinderEntityDelivery {
+    /// The player.
+    pub character: Uuid,
+    /// The Group Finder entity; `None` removes it.
+    pub view: Option<GroupFinderEntityView>,
+}
+
 /// A raid member's raid entity and the raid's group entities but its own (its own group comes
 /// as its [`GroupEntityView`]).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -409,6 +427,9 @@ pub struct SocialDeliveries {
     pub own_states: Vec<OwnStateDelivery>,
     /// The group entity changes.
     pub group_entities: Vec<GroupEntityDelivery>,
+    /// The Group Finder entity changes (`1091`).
+    #[serde(default)]
+    pub group_finder_entities: Vec<GroupFinderEntityDelivery>,
     /// The service's answers to the upkeep payments of this sim's players.
     #[serde(default)]
     pub upkeep_answers: Vec<UpkeepAnswer>,
@@ -576,6 +597,13 @@ mod tests {
                     view: None,
                 },
             ],
+            group_finder_entities: vec![GroupFinderEntityDelivery {
+                character,
+                view: Some(GroupFinderEntityView {
+                    group: Uuid::from_u128(10),
+                    body: vec![2],
+                }),
+            }],
             upkeep_answers: vec![UpkeepAnswer {
                 character,
                 territory: 6,

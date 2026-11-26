@@ -221,6 +221,7 @@ fn position_of(member: &BundleMember) -> Option<WorldPosition> {
         | MemberState::Guilds(_)
         | MemberState::Chat(_)
         | MemberState::GroupData(_)
+        | MemberState::GroupFinderData(_)
         | MemberState::RaidData(_)
         | MemberState::WarData(_)
         | MemberState::SiegeWarfareData(_)

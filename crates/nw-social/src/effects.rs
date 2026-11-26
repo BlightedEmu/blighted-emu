@@ -3,8 +3,9 @@
 //! two steps of a treasury transfer.
 
 use nw_bus::{
-    BusId, CoinTransfer, CompanyAnswer, GroupEntityDelivery, OwnStateDelivery, RaidEntityDelivery,
-    RaidInviteAnswer, SocialDelivery, TownProjectAnswer, UpkeepAnswer,
+    BusId, CoinTransfer, CompanyAnswer, GroupEntityDelivery, GroupFinderEntityDelivery,
+    OwnStateDelivery, RaidEntityDelivery, RaidInviteAnswer, SocialDelivery, TownProjectAnswer,
+    UpkeepAnswer,
 };
 use nw_db::{
     CoinReturn, Company, CompanyInvite, CompanyMember, LinkKind, PlayerRaidRecord, PlayerReport,
@@ -35,6 +36,13 @@ pub enum Effect {
         sim: BusId,
         /// The group entity.
         delivery: GroupEntityDelivery,
+    },
+    /// Send a player's Group Finder entity (`1091`) to its sim.
+    GroupFinderEntity {
+        /// The sim of the player.
+        sim: BusId,
+        /// The Group Finder entity.
+        delivery: GroupFinderEntityDelivery,
     },
     /// Send a player's raid entity and its raid's other group entities to its sim.
     RaidEntity {

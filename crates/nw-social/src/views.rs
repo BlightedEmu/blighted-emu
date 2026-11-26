@@ -15,12 +15,13 @@
 use std::collections::BTreeSet;
 
 use nw_bus::{
-    GroupEntityDelivery, GroupEntityView, OwnStateDelivery, RaidEntityDelivery, RaidEntityView,
-    SocialStateKind,
+    GroupEntityDelivery, GroupEntityView, GroupFinderEntityDelivery, GroupFinderEntityView,
+    OwnStateDelivery, RaidEntityDelivery, RaidEntityView, SocialStateKind,
 };
 use nw_messages::FullList;
 use nw_messages::items::FIRST_VERSION;
 use nw_messages::social::group_data::{GroupDataState, GroupMemberView};
+use nw_messages::social::group_finder::GroupFinderGroupDataState;
 use nw_messages::social::states::{
     ChatState, GUILD_INVITE_KIND, GroupInviteData, GroupsState, GuildInviteData, GuildsState,
     NO_GUILD_RANK, SocialState,
@@ -102,6 +103,7 @@ pub(crate) struct SentViews {
     guilds: Option<GuildsState>,
     chat: Option<Vec<String>>,
     group_entity: Option<Option<(Uuid, GroupDataState)>>,
+    group_finder_entity: Option<Option<(Uuid, GroupFinderGroupDataState)>>,
     raid: Option<Option<RaidView>>,
 }
 
@@ -188,6 +190,7 @@ impl SocialWorld {
             | Effect::MoveCoins { .. }
             | Effect::OwnState { .. }
             | Effect::GroupEntity { .. }
+            | Effect::GroupFinderEntity { .. }
             | Effect::RaidEntity { .. }
             | Effect::UpkeepAnswered { .. }
             | Effect::RaidInviteAnswered { .. } => Vec::new(),
@@ -247,6 +250,7 @@ impl SocialWorld {
         let guilds = self.guilds_view(character, now_ms);
         let chat = self.chat_view(character);
         let entity = self.group_entity_view(character);
+        let group_finder = self.group_finder_entity_view(character);
         let raid = self.raid_view(character);
         let mut sent = self.sent.remove(&character).unwrap_or_default();
         let mut out = Vec::new();
@@ -334,6 +338,21 @@ impl SocialWorld {
             sent.group_entity = Some(entity);
             view.map(|view| GroupEntityDelivery { character, view })
         };
+        let gf_entity_out = if sent.group_finder_entity.as_ref() == Some(&group_finder) {
+            None
+        } else {
+            let view = match &group_finder {
+                Some((group, state)) => encode(|w| state.write(w)).map(|body| {
+                    Some(GroupFinderEntityView {
+                        group: *group,
+                        body,
+                    })
+                }),
+                None => Some(None),
+            };
+            sent.group_finder_entity = Some(group_finder);
+            view.map(|view| GroupFinderEntityDelivery { character, view })
+        };
         let raid_out = if sent.raid.as_ref() == Some(&raid) {
             None
         } else {
@@ -353,6 +372,12 @@ impl SocialWorld {
         }
         if let Some(delivery) = entity_out {
             self.out.push(Effect::GroupEntity {
+                sim: sim.clone(),
+                delivery,
+            });
+        }
+        if let Some(delivery) = gf_entity_out {
+            self.out.push(Effect::GroupFinderEntity {
                 sim: sim.clone(),
                 delivery,
             });

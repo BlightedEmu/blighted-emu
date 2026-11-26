@@ -880,7 +880,10 @@ impl Loop {
             }
             Some(REQUEST_RESPAWN_TYPE_INDEX) => self.respawn_request(connection, &envelope.body),
             Some(SPREADSHOT_REQUEST_TYPE_INDEX) => self.spreadshot(connection, &envelope.body),
-            Some(index) if let Some(request) = LookupRequest::decode(index, &envelope.body) => {
+            Some(index)
+                if index != nw_messages::lookups::REQUEST_LOBBY_COUNTS_TYPE_INDEX
+                    && let Some(request) = LookupRequest::decode(index, &envelope.body) =>
+            {
                 match request {
                     Ok(request) => self.world.lookup(connection, &request),
                     Err(error) => {

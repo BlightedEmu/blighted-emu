@@ -49,8 +49,8 @@ pub use snapshot::{
 pub use social::ICON_LEN as SOCIAL_ICON_LEN;
 pub use social::{
     CoinReply, CoinTransfer, CompanyAnswer, CompanyCreated, GroupEntityDelivery, GroupEntityView,
-    LeaveReason, OwnStateDelivery, PlayerVitals, RaidEntityDelivery, RaidEntityView,
-    RaidInviteAnswer, RaidSpec, SocialBatch, SocialDeliveries, SocialDelivery, SocialFacetKind,
-    SocialHeader, SocialInput, SocialPlayer, SocialStateKind, TownProjectAnswer, TownProjectCancel,
-    TownProjectStart, UpkeepAnswer, UpkeepPayment,
+    GroupFinderEntityDelivery, GroupFinderEntityView, LeaveReason, OwnStateDelivery, PlayerVitals,
+    RaidEntityDelivery, RaidEntityView, RaidInviteAnswer, RaidSpec, SocialBatch, SocialDeliveries,
+    SocialDelivery, SocialFacetKind, SocialHeader, SocialInput, SocialPlayer, SocialStateKind,
+    TownProjectAnswer, TownProjectCancel, TownProjectStart, UpkeepAnswer, UpkeepPayment,
 };

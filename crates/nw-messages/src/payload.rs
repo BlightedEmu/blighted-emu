@@ -63,6 +63,7 @@ use crate::progression::{PROGRESSION_TYPE_INDEX, ProgressionState};
 use crate::progression_points::{PROGRESSION_POINT_TYPE_INDEX, ProgressionPointState};
 use crate::projectile_state::{PROJECTILE_TYPE_INDEX, ProjectileState};
 use crate::social::group_data::{GROUP_DATA_TYPE_INDEX, GroupDataState};
+use crate::social::group_finder::{GROUP_FINDER_DATA_TYPE_INDEX, GroupFinderGroupDataState};
 use crate::social::raid_data::{RAID_DATA_TYPE_INDEX, RaidDataState};
 use crate::social::states::{
     CHAT_STATE_TYPE_INDEX, ChatState, GROUPS_STATE_TYPE_INDEX, GUILDS_STATE_TYPE_INDEX,
@@ -213,6 +214,8 @@ pub enum MemberState {
     Chat(ChatState),
     /// `Javelin::GroupDataComponentReplicatedState` (the group entity).
     GroupData(Box<GroupDataState>),
+    /// `Javelin::GroupFinderGroupDataComponentReplicatedState` (the Group Finder entity).
+    GroupFinderData(Box<GroupFinderGroupDataState>),
     /// `Javelin::RaidDataComponentReplicatedState` (the raid entity).
     RaidData(RaidDataState),
     /// `MB::WarDataComponentReplicatedState` (the slot-2 world entity).
@@ -327,6 +330,7 @@ impl MemberState {
             Self::Guilds(_) => GUILDS_STATE_TYPE_INDEX,
             Self::Chat(_) => CHAT_STATE_TYPE_INDEX,
             Self::GroupData(_) => GROUP_DATA_TYPE_INDEX,
+            Self::GroupFinderData(_) => GROUP_FINDER_DATA_TYPE_INDEX,
             Self::RaidData(_) => RAID_DATA_TYPE_INDEX,
             Self::WarData(_) => WAR_DATA_TYPE_INDEX,
             Self::SiegeWarfareData(_) => SIEGE_WARFARE_DATA_TYPE_INDEX,
@@ -539,6 +543,11 @@ impl MemberState {
             TypeId::FileSlot(GROUP_DATA_TYPE_INDEX) => GroupDataState::read(reader)
                 .map(Box::new)
                 .map(Self::GroupData),
+            TypeId::FileSlot(GROUP_FINDER_DATA_TYPE_INDEX) => {
+                GroupFinderGroupDataState::read(reader)
+                    .map(Box::new)
+                    .map(Self::GroupFinderData)
+            }
             TypeId::FileSlot(RAID_DATA_TYPE_INDEX) => {
                 RaidDataState::read(reader).map(Self::RaidData)
             }
@@ -701,6 +710,7 @@ impl MemberState {
             Self::Guilds(state) => state.write(writer),
             Self::Chat(state) => state.write(writer),
             Self::GroupData(state) => state.write(writer),
+            Self::GroupFinderData(state) => state.write(writer),
             Self::RaidData(state) => state.write(writer),
             Self::WarData(state) => state.write(writer),
             Self::SiegeWarfareData(state) => state.write(writer),
