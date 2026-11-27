@@ -1899,7 +1899,7 @@
               "proof": "tests"
             },
             {
-              "check": "The walk map behind its switch does not break the bots (2026-11-24, bots): with `mob_walk_map` on, 90 hunt bots fought mobs for 10 minutes with no late tick (the mob step took 0.90 ms a tick, 0.82 ms without the map), one bot ended the same 26 main story quests as without the map, and a group of 5 bots ended an expedition. 2026-11-25, bots, map on: groups of 5 bots fought to the run end of the other 11 expeditions (last boss dead, run ended); in 10 of them every bot that stayed connected opened its end chest, and in one (Barnacles) 2 of 5 did, in two runs, the same count as with the map off. The switch is off by default in the code; the test servers run with it on since 2026-11-25. Not checked: the side quests, the trials but one, and the live game client.",
+              "check": "The walk map behind its switch does not break the bots (2026-11-24, bots): with `mob_walk_map` on, 90 hunt bots fought mobs for 10 minutes with no late tick (the mob step took 0.90 ms a tick, 0.82 ms without the map), one bot ended the same 26 main story quests as without the map, and a group of 5 bots ended an expedition. 2026-11-25, bots, map on: groups of 5 bots fought to the run end of the other 11 expeditions (last boss dead, run ended); in 10 of them every bot that stayed connected opened its end chest, and in one (Barnacles) 2 of 5 did, in two runs, the same count as with the map off. The switch is off by default in the code; the test servers run with it on since 2026-11-25. Not checked: the side quests, the trials but one, and the live game client. Since 2026-11-27 the switch is on by default (`mob_walk_map = false` turns it off).",
               "proof": "bots"
             },
             {
@@ -4587,6 +4587,7 @@
     "**Content folder layout (2026-11-16):** log in and play on the game VM, and run one admin site Apply with a design file on the new layout."
   ],
   "done": [
+    "The mob walk map is on by default (2026-11-27): a server needs no setting for it; `mob_walk_map = false` in the sim config turns it off.",
     "Store mounts (2026-11-26, tests only): a bought mount needs only riding unlocked, not the unlock of its own mount type.",
     "Live play test of 2026-11-26, second round (seen live by a player): a named knife mob walks with its walk animation; grenadiers throw grenades that explode and hit with the torch at close range; the beach first mate moves faster. New fix after that round (tests only): mobs that ran in place beside a tree, and a torch mob on a wreck's deck whose swings did not reach.",
     "Night of 2026-11-26 (tests only, on the PC and the game VM): mobs use their size number for speed and reach; mobs hear a fast player behind them; walk and strafe actions with no client number fall back to a numbered action of the same fragment; `!marks` gives Marks of Fortune that show at once; a refused mount choice is logged with its reason.",
@@ -4858,6 +4859,6 @@
     "Mob attacks (2026-11-24, tests only): a javelin skeleton no longer starts a new throw each tick at mid range; an attack that cannot be cut plays to its end."
   ],
   "clientBuild": "25810808",
-  "updated": "2026-11-26",
+  "updated": "2026-11-27",
   "lastCommit": "63052cd2"
 }

@@ -48,8 +48,8 @@ instance_request_timeout_ms = 65000
 # Left out, every mode is open.
 # closed_queues = ["catacombs"]
 # Whether the mobs walk on the walk map: a mob then takes no step onto a place where its body
-# does not stand (beside a wall, on a pile of bricks). Left out, it is off.
-# mob_walk_map = true
+# does not stand (beside a wall, on a pile of bricks). Left out, it is on.
+# mob_walk_map = false
 # The most players this sim takes. The world director puts the free places into the login
 # queue.
 max_players = 2000

@@ -263,8 +263,10 @@ pub struct SimConfig {
     #[serde(default)]
     pub closed_queues: Vec<QueuedMode>,
     /// Whether the mobs walk on the walk map (`nw_sim_core::walk_map`): a mob then takes no step
-    /// onto a place where its body does not stand. Off by default (the walk map plan, phase 2).
-    #[serde(default)]
+    /// onto a place where its body does not stand. On by default since 2026-11-27 (the project
+    /// owner's order after two days of live play with it on: off by default, no operator
+    /// tests it); `false` turns it off.
+    #[serde(default = "default_mob_walk_map")]
     pub mob_walk_map: bool,
 }
 
@@ -350,6 +352,13 @@ const DEFAULT_INSTANCE_REQUEST_TIMEOUT_MS: u64 = 65_000;
 
 const fn default_instance_request_timeout_ms() -> u64 {
     DEFAULT_INSTANCE_REQUEST_TIMEOUT_MS
+}
+
+/// Whether the mobs walk on the walk map when the file does not say.
+const DEFAULT_MOB_WALK_MAP: bool = true;
+
+const fn default_mob_walk_map() -> bool {
+    DEFAULT_MOB_WALK_MAP
 }
 
 /// `[admin]` (admin tools spec section 5).
@@ -712,6 +721,21 @@ pub(crate) mod tests {
         std::fs::remove_dir_all(&dir).expect("clean");
         assert!(loaded.is_err());
         assert!(same_loaded.is_ok(), "the copy without the key loads");
+    }
+
+    /// The committed config leaves the walk map on, and an operator can turn it off.
+    #[test]
+    fn the_committed_config_has_the_mob_walk_map_on() {
+        assert!(committed().mob_walk_map);
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join(COMMITTED_CONFIG);
+        let text = std::fs::read_to_string(&path).expect("committed config");
+        let off_path =
+            std::env::temp_dir().join(format!("sim-walk-map-off-{}.toml", std::process::id()));
+        std::fs::write(&off_path, format!("mob_walk_map = false\n{text}"))
+            .expect("write the config with the map off");
+        let loaded = load_sim_config(&off_path);
+        std::fs::remove_file(&off_path).expect("remove the config with the map off");
+        assert!(!loaded.expect("config with the map off").mob_walk_map);
     }
 
     /// The committed config keeps every queued mode open (the catacombs run is complete from
