@@ -21,7 +21,7 @@
 
 use bevy_ecs::entity::Entity;
 use nw_bus::{CarriedMount, ConnectionRef, GhostMount, MOUNT_DYE_LEN, PlayerMounts};
-use nw_content::mounts::{MountRule, MountStaminaRules, MountTypeRule};
+use nw_content::mounts::{MountRule, MountRules, MountStaminaRules, MountTypeRule};
 use nw_messages::items::{FIRST_VERSION, FullList};
 use nw_messages::mount::{
     LOGIN_STAMINA, LOGIN_STAMINA_RATE, NEUTRAL_MULTIPLIER, name_fits, riding_active_map,
@@ -36,6 +36,7 @@ use nw_sim_core::{MountPaces, MoveLimits};
 
 use super::attack::{Vitals, counter_is_newer};
 use super::gear::{Gear, unix_ns};
+use super::level_flow::AchievementRules;
 use super::replica::PAPERDOLL_COMPONENT;
 use super::{MESSAGE_CHANNEL, Outgoing, Player, SimWorld, gather_answer};
 
@@ -50,6 +51,8 @@ const NO_SUCH_MOUNT: &str = "no such mount";
 const NOT_OWNED: &str = "the player does not own the mount";
 /// Why a mount choice is refused: the achievement of its mount type is not set.
 const TYPE_LOCKED: &str = "its mount type is not unlocked";
+/// Why a store mount's choice is refused: the player has unlocked no mount type yet.
+const NO_RIDING: &str = "the player has not unlocked riding";
 /// The dash starts only with this much mount stamina (`playeractions_mount.actionlist`
 /// `MountDash`: `IfMountStamina GreaterThanOrEqual 15`).
 const DASH_MIN_STAMINA: f32 = 15.0;
@@ -660,11 +663,7 @@ impl SimWorld {
             let player = &mut *player;
             if player.own_card_sent
                 && std::mem::take(&mut player.mount.unlock_due)
-                && mounts.types().any(|mount_type| {
-                    player
-                        .flow
-                        .has_achievement(rules, &mount_type.required_achievement)
-                })
+                && Self::rides(mounts, rules, player)
             {
                 player.mount.enabled_sent = true;
                 let enable = MountServerMsg::EnableMounts {
@@ -944,9 +943,17 @@ impl SimWorld {
         }
     }
 
-    /// The mount `mount` with its type, when `player` owns it and its type is unlocked: its
-    /// `RequiredAchievementId` is set, or, for a store mount (`IsEntitlement`), the player's
-    /// account holds the store entitlement that unlocks it; and its type's achievement is set.
+    /// Whether `player` has unlocked riding: the achievement of a mount type is set (the first
+    /// mount quest gives the horse's).
+    fn rides(mounts: &MountRules, rules: &AchievementRules, player: &Player) -> bool {
+        mounts.types().any(|mount_type| {
+            player
+                .flow
+                .has_achievement(rules, &mount_type.required_achievement)
+        })
+    }
+
+    /// The mount `mount` with its type, when `player` may use it ([`Self::mount_use`]).
     fn usable<'a>(
         &'a self,
         player: &Player,
@@ -955,11 +962,14 @@ impl SimWorld {
         self.mount_use(player, mount).ok()
     }
 
-    /// [`Self::usable`], or why `player` cannot use `mount`: [`NOT_OWNED`] or [`TYPE_LOCKED`].
-    /// The type rule is the game data's: a mount type names the achievement that unlocks it
-    /// (the lion's `MountType_Unlock_Sabretooth`, which only a quest, a season reward or a
-    /// backstory gives), and a store mount is one mount of its type. No capture shows a store
-    /// mount of a locked type chosen (Unknown).
+    /// The mount `mount` with its type, or why `player` cannot use it. A mount with a
+    /// `RequiredAchievementId` needs that achievement ([`NOT_OWNED`]) and its type's
+    /// ([`TYPE_LOCKED`]: the lion's `MountType_Unlock_Sabretooth`, which a quest, a season
+    /// reward or a backstory gives). A store mount (`IsEntitlement`) needs its store
+    /// entitlement on the account ([`NOT_OWNED`]) and riding unlocked ([`NO_RIDING`]), not its
+    /// own type: the project owner's account of retail, 2026-11-26 (a bought lion is ridden
+    /// from the first mount quest on, whatever the level and the quests done). No capture
+    /// shows a store mount of a locked type chosen.
     fn mount_use<'a>(
         &'a self,
         player: &Player,
@@ -980,13 +990,17 @@ impl SimWorld {
             return Err(NOT_OWNED);
         }
         let mount_type = self.content.mounts.mount_type(mount).ok_or(TYPE_LOCKED)?;
-        if !player
+        let type_unlocked = player
             .flow
-            .has_achievement(rules, &mount_type.required_achievement)
-        {
-            return Err(TYPE_LOCKED);
+            .has_achievement(rules, &mount_type.required_achievement);
+        match (type_unlocked, bought) {
+            (true, _) => Ok((mount, mount_type)),
+            (false, true) if Self::rides(&self.content.mounts, rules, player) => {
+                Ok((mount, mount_type))
+            }
+            (false, true) => Err(NO_RIDING),
+            (false, false) => Err(TYPE_LOCKED),
         }
-        Ok((mount, mount_type))
     }
 
     /// The summon key of player `entity` at `now_ms` (retail Mount-quest capture: 5747 40 ms
@@ -1016,11 +1030,7 @@ impl SimWorld {
             Err(SummonCancelReason::Combat)
         } else if player.tracked.is_swimming() {
             Err(SummonCancelReason::Swimming)
-        } else if !mounts.types().any(|mount_type| {
-            player
-                .flow
-                .has_achievement(rules, &mount_type.required_achievement)
-        }) {
+        } else if !Self::rides(mounts, rules, player) {
             Err(SummonCancelReason::RequirementsNotMet)
         } else {
             let chosen = player
@@ -1655,6 +1665,11 @@ mod tests {
         const HORSE_GIFT: &str = "AwardAchievement_Mount_Horse_1";
         const UNLOCK_BIT: u32 = 1_000;
         const GIFT_BIT: u32 = 1_001;
+        /// A store mount of the lion type, its entitlement, and the lion type's unlock.
+        const STORE_LION: &str = "Mount_MTX_4_lion_basic";
+        const LION_ENTITLEMENT: &str = "Ent_Mount_MTX_4_lion_basic";
+        const LION_UNLOCK: &str = "MountType_Unlock_Sabretooth";
+        const LION_UNLOCK_BIT: u32 = 1_002;
         /// The retail summon time and dismount cooldowns.
         const SUMMON_MS: u32 = 3_000;
         const COOLDOWN_MS: u64 = 1_000;
@@ -1802,6 +1817,40 @@ mod tests {
                 mount_of(&mut world).selected,
                 Some(lowercase_crc32(STORE_BEAR))
             );
+        }
+
+        /// The sim of [`world_with`] whose player's account holds the store lion.
+        fn world_with_the_store_lion(achievements: Vec<u32>) -> SimWorld {
+            let mut world = world_with(achievements);
+            let entity = world.player_by_number(PLAYER).expect("player");
+            world
+                .world
+                .get_mut::<Player>(entity)
+                .expect("player")
+                .entitlements
+                .insert(LION_ENTITLEMENT.to_owned());
+            world
+        }
+
+        #[test]
+        fn a_bought_lion_is_ridden_once_riding_is_unlocked_without_the_lion_type() {
+            // A player's report of 2026-11-25: a bought white lion did not equip. The character
+            // had the horse type of the first mount quest, not the lion type of the lion quest.
+            let mut world = world_with_the_store_lion(vec![UNLOCK_BIT]);
+            let entity = world.player_by_number(PLAYER).expect("player");
+            assert!(may_use(&mut world, STORE_LION));
+            world.change_mount(entity, lowercase_crc32(STORE_LION), NOW);
+            assert_eq!(
+                mount_of(&mut world).selected,
+                Some(lowercase_crc32(STORE_LION))
+            );
+            // Before the first mount quest no mount is ridden, a bought one too.
+            let mut world = world_with_the_store_lion(Vec::new());
+            assert!(!may_use(&mut world, STORE_LION));
+            // The lion type alone unlocks riding too.
+            let mut world = world_with_the_store_lion(vec![LION_UNLOCK_BIT]);
+            assert!(may_use(&mut world, STORE_LION));
+            assert!(!may_use(&mut world, STORE_BEAR), "the bear is not bought");
         }
 
         /// The sim of [`world_with`] whose store has the settings `shop`.
@@ -2135,15 +2184,26 @@ mod tests {
                         sorted_order: 2,
                         disabled_dye_channels: [false; MOUNT_DYE_LEN],
                     },
+                    MountRule {
+                        id: STORE_LION.to_owned(),
+                        crc: lowercase_crc32(STORE_LION),
+                        mount_type: "Sabretooth".to_owned(),
+                        required_achievement: None,
+                        entitlement: true,
+                        sorted_order: 3,
+                        disabled_dye_channels: [false; MOUNT_DYE_LEN],
+                    },
                 ],
-                [MountTypeRule {
-                    id: "Horse".to_owned(),
-                    summon_ms: SUMMON_MS,
-                    voluntary_dismount_cooldown_ms: COOLDOWN_MS,
-                    forced_dismount_cooldown_ms: COOLDOWN_MS,
-                    required_achievement: HORSE_UNLOCK.to_owned(),
-                    tradeskill: "Riding".to_owned(),
-                }],
+                [("Horse", HORSE_UNLOCK), ("Sabretooth", LION_UNLOCK)].map(|(id, unlock)| {
+                    MountTypeRule {
+                        id: id.to_owned(),
+                        summon_ms: SUMMON_MS,
+                        voluntary_dismount_cooldown_ms: COOLDOWN_MS,
+                        forced_dismount_cooldown_ms: COOLDOWN_MS,
+                        required_achievement: unlock.to_owned(),
+                        tradeskill: "Riding".to_owned(),
+                    }
+                }),
                 [("ConfigMountRiding_0".to_owned(), movement())],
                 HashMap::from([(
                     "riding".to_owned(),
@@ -2154,6 +2214,7 @@ mod tests {
             let indexes = AchievementIndexes::build([
                 (HORSE_UNLOCK.to_owned(), UNLOCK_BIT),
                 (HORSE_GIFT.to_owned(), GIFT_BIT),
+                (LION_UNLOCK.to_owned(), LION_UNLOCK_BIT),
             ]);
             let mut world = world_with_spawns(Vec::new());
             world.achievement_rules = crate::world::level_flow::AchievementRules::of(&indexes, &[]);
@@ -2161,14 +2222,24 @@ mod tests {
                 mounts,
                 achievements: indexes,
                 store: StoreTable {
-                    mounts: vec![StoreMount {
-                        unlock: StoreEntitlement {
-                            entitlement: BEAR_ENTITLEMENT.to_owned(),
-                            name: "Ronin Bear Mount".to_owned(),
+                    mounts: vec![
+                        StoreMount {
+                            unlock: StoreEntitlement {
+                                entitlement: BEAR_ENTITLEMENT.to_owned(),
+                                name: "Ronin Bear Mount".to_owned(),
+                            },
+                            mount: STORE_BEAR.to_owned(),
+                            product: "Mount_Bear_MTX7_Ronin".to_owned(),
                         },
-                        mount: STORE_BEAR.to_owned(),
-                        product: "Mount_Bear_MTX7_Ronin".to_owned(),
-                    }],
+                        StoreMount {
+                            unlock: StoreEntitlement {
+                                entitlement: LION_ENTITLEMENT.to_owned(),
+                                name: "White Lion Mount".to_owned(),
+                            },
+                            mount: STORE_LION.to_owned(),
+                            product: "Mount_Lion_MTX4_Basic".to_owned(),
+                        },
+                    ],
                     tokens: Vec::new(),
                     held_by_all: Vec::new(),
                 },

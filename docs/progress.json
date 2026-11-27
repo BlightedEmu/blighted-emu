@@ -3107,8 +3107,8 @@
               "proof": "tests"
             },
             {
-              "check": "A store mount of a type the character did not unlock is refused, and the server log now says why (`mount choice refused`: no such mount, not owned, or type locked) (2026-11-26, tests only). The rule itself is from the game data and public guides: a mount type opens with its riding quest; no retail capture shows a store mount of a locked type.",
-              "proof": "code"
+              "check": "A bought store mount is chosen and ridden once the character has unlocked riding (the first mount quest), whatever its mount type: a bought lion needs no lion quest (2026-11-26, tests only). Before, the server also asked for the unlock of the mount's own type and a bought lion did not equip. A quest mount still needs the unlock of its type. A refused mount choice is written to the server log with its reason. No retail capture shows a bought mount of a type the character did not unlock; the rule is from the project owner's account of retail.",
+              "proof": "tests"
             }
           ]
         },
@@ -4587,6 +4587,7 @@
     "**Content folder layout (2026-11-16):** log in and play on the game VM, and run one admin site Apply with a design file on the new layout."
   ],
   "done": [
+    "Store mounts (2026-11-26, tests only): a bought mount needs only riding unlocked, not the unlock of its own mount type.",
     "Live play test of 2026-11-26, second round (seen live by a player): a named knife mob walks with its walk animation; grenadiers throw grenades that explode and hit with the torch at close range; the beach first mate moves faster. New fix after that round (tests only): mobs that ran in place beside a tree, and a torch mob on a wreck's deck whose swings did not reach.",
     "Night of 2026-11-26 (tests only, on the PC and the game VM): mobs use their size number for speed and reach; mobs hear a fast player behind them; walk and strafe actions with no client number fall back to a numbered action of the same fragment; `!marks` gives Marks of Fortune that show at once; a refused mount choice is logged with its reason.",
     "Mobs without a Server.pak behaviour tree (2026-11-26, tests only): `content-tool ai-data` now binds sibling Server.pak trees (plague rats, fox, lion diver, catacombs and solo bosses) and builds stand-in trees from `baseai` sub-trees and each creature's own CAGE grid attacks for spiders, werebeasts, Upyr, Inquisitors, feral ghouls, bloodbeasts and more (960 of 986 archetypes now have a tree). Sim test proves spiders, plague rats, werebeasts, Upyr and Inquisitors chase and attack; the three FTUE tutorial mobs stay on their measured script.",
