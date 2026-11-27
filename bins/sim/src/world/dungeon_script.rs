@@ -875,6 +875,31 @@ impl DungeonRun {
             .unwrap_or_default()
     }
 
+    /// Whether start object `entity` starts its encounter's event: it stands, and no wave of
+    /// the encounter but the stage that spawned it has started (`Wave_01 - Objective: Interact`
+    /// of `enc_worldevent_12mb01_ancientstonetablet_waveevent`, whose altar a player uses to
+    /// call the navigator; the rubble a later wave spawns does not).
+    pub(super) fn starts_its_event(&self, entity: u64) -> bool {
+        self.script
+            .encounters
+            .iter()
+            .zip(&self.encounters)
+            .any(|(encounter, run)| {
+                run.mobs
+                    .iter()
+                    .find(|mob| mob.entity == entity && !mob.gone)
+                    .is_some_and(|mob| {
+                        encounter.stages.iter().zip(&run.stages).enumerate().all(
+                            |(index, (def, stage))| {
+                                index == mob.stage
+                                    || !def.user_wave
+                                    || stage.status == StageStatus::Pending
+                            },
+                        )
+                    })
+            })
+    }
+
     /// The live mobs of every encounter.
     pub(super) fn mobs(&self) -> impl Iterator<Item = u64> + '_ {
         self.encounters
@@ -3774,6 +3799,10 @@ mod tests {
         run.tick(&mut host, &view(&[PLACE]), &[], T0 + 1);
         assert_eq!(host.spawned.len(), 1, "the start object stands");
         assert!(host.spawned[0].0.contains(START_OBJECT));
+        assert!(
+            run.starts_its_event(host.next),
+            "no other wave of its encounter has started"
+        );
         assert_eq!(host.object_yaws, [ENCOUNTER_YAW_DEG + TURN_DEG]);
         assert_eq!(stage_status(&run, 0), StageStatus::Running);
         assert_eq!(
@@ -3788,6 +3817,7 @@ mod tests {
         run.tick(&mut host, &view(&[PLACE]), &[], T0 + 2);
         run.tick(&mut host, &view(&[PLACE]), &[], T0 + 3);
         assert_eq!(stage_status(&run, 0), StageStatus::Done);
+        assert!(!run.starts_its_event(host.next), "the object is gone");
     }
 
     /// The stronghold siren's `Wave_02 - Objective: Stop Cannons` (`Playthrough_Part_18`

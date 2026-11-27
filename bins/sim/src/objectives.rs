@@ -859,6 +859,8 @@ struct Task {
     /// (`99F_MSQ_ER_FightLiang_KillLiang` a game event, `09A_M15_TriggerArea_TrialEnter` a
     /// trigger area), which a player enters first ([`ObjectiveRun::task_game_mode`]).
     game_mode: Option<String>,
+    /// Its row's `OverrideLocation`: where the player does it.
+    place: Option<Position>,
     stay_active: bool,
     parent: Option<usize>,
     children: Vec<usize>,
@@ -1590,6 +1592,7 @@ impl ObjectiveTree {
             kind: kind_of(row),
             interact_tag: row.interact_tag.clone().filter(|tag| !tag.is_empty()),
             game_mode: row.game_mode_id.clone().filter(|mode| !mode.is_empty()),
+            place: row.override_location.as_deref().and_then(location_of),
             stay_active: row.stay_active,
             parent,
             children: Vec::new(),
@@ -2253,6 +2256,45 @@ impl ObjectiveRun {
                         .as_deref()
                         .is_some_and(|own| own.eq_ignore_ascii_case(tag))
             })
+    }
+
+    /// The places and interact tags of the done object tasks whose fight the player still owes:
+    /// a game event task with an interact tag that is done, so the object is closed to the player
+    /// ([`Self::enables_interact`]), while a task of the same objective still waits for a kill,
+    /// for the drop of a kill or for a game event (the result of the object's event).
+    ///
+    /// Bug, live 2026-11-27 (`12A_MSQ_15_DefeatNavigator`): a player used the altar, which
+    /// starts the event that spawns the navigator, and died before the kill. The event reset,
+    /// the navigator went, and the altar stayed closed to the player: the task
+    /// `12A_MSQ_15_DefeatNavigator_CollectGun` (the navigator's drop) could not end. The game
+    /// client shows the altar's prompt only while its task is active, so the server starts the
+    /// object's event for such a player ([`crate::world`], `use_owed_objects`). What retail
+    /// does for a player in this state is Unknown: no capture shows one. Build 25810808: 44
+    /// objectives have a task whose object an open world encounter spawns; 31 of them go on
+    /// with a kill or a kill's drop, the others with a game event.
+    pub(crate) fn owed_interacts(&self) -> Vec<(Position, &str)> {
+        let owes_a_fight = self.waiting().any(|kind| {
+            matches!(
+                kind,
+                TaskKind::KillContribution { .. }
+                    | TaskKind::GameEvent { .. }
+                    | TaskKind::HaveItems { drop: Some(_), .. }
+                    | TaskKind::GatherItems { drop: Some(_), .. }
+            )
+        });
+        if !owes_a_fight {
+            return Vec::new();
+        }
+        self.tree
+            .tasks
+            .iter()
+            .zip(&self.states)
+            .filter(|(task, state)| {
+                matches!(state, TaskState::Done) && matches!(task.kind, TaskKind::GameEvent { .. })
+            })
+            .filter_map(|(task, _)| Some((task.place?, task.interact_tag.as_deref()?)))
+            .filter(|(_, tag)| !self.enables_interact(tag))
+            .collect()
     }
 
     /// Whether a task of the puzzle of slayer script `script` waits ([`TaskKind::SlayerScript`]).
@@ -3288,6 +3330,68 @@ pub(crate) mod tests {
         assert!(!run.is_done("Enter"), "another game mode");
         run.event(Event::GameModeEntered("dungeonamrine"), 0);
         assert!(run.finished(), "entering its game mode ends it");
+    }
+
+    /// Build 25810808, `12A_MSQ_15_DefeatNavigator`: the altar's game event or the navigator's
+    /// kill ends the altar step; then the navigator's blunderbuss and the altar's shard.
+    #[test]
+    fn a_done_object_task_is_owed_while_its_objective_waits_for_its_fight() {
+        const ALTAR_TAG: &str = "IO_MB_MSQ2_DefeatNavigator_Altar";
+        const ALTAR_EVENT: &str = "MB_MSQ2_DefeatNavigator_Altar_interact";
+        const ALTAR_PLACE: &str = "7821.835 4206.391 112.389";
+        const NAVIGATOR: &str = "Undead_Navigator_Named_12MB01d";
+        const GUN: &str = "12A_MSQ_15_PirateBlunderbuss";
+        let rows = vec![
+            container(
+                "Root",
+                "ConsecutiveTaskContainer",
+                &["Altar", "Gun", "After"],
+            ),
+            container("Altar", "PartialTaskContainer", &["Use", "Kill"]),
+            TaskRow {
+                kill_enemy_type: Some(ALTAR_EVENT.to_owned()),
+                interact_tag: Some(ALTAR_TAG.to_owned()),
+                override_location: Some(ALTAR_PLACE.to_owned()),
+                target_qty: Some(1),
+                ..row("Use", "TaskGameEvent")
+            },
+            TaskRow {
+                kill_enemy_type: Some(NAVIGATOR.to_owned()),
+                target_qty: Some(1),
+                ..row("Kill", "TaskKillContribution")
+            },
+            TaskRow {
+                item_drop_vc: Some(NAVIGATOR.to_owned()),
+                item_drop_probability: Some(100),
+                target_qty: Some(1),
+                ..with_item("Gun", "TaskHaveAndReturnItems", GUN)
+            },
+            with_item("After", "TaskEquipItem", "SwordT1"),
+        ];
+        let tree = Arc::new(TaskBook::new(rows).tree("Root").expect("tree"));
+        let (mut run, _) = ObjectiveRun::start(tree, 0);
+        assert!(
+            run.owed_interacts().is_empty(),
+            "the altar is open: its task waits"
+        );
+        run.event(Event::GameEvent(ALTAR_EVENT), 0);
+        let altar = location_of(ALTAR_PLACE).expect("place");
+        assert_eq!(
+            run.owed_interacts(),
+            vec![(altar, ALTAR_TAG)],
+            "the altar is closed and the gun is not there"
+        );
+        run.event(
+            Event::ItemGained {
+                item: GUN,
+                quantity: 1,
+            },
+            0,
+        );
+        assert!(
+            run.owed_interacts().is_empty(),
+            "with the gun, no fight is owed"
+        );
     }
 
     #[test]

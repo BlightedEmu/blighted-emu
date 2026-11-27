@@ -2311,6 +2311,10 @@
             {
               "check": "Not done: one new character that plays the whole list in one run with no server restart (a run is in work). The horn of the `09A_M5` defence cannot be blown: the waves start when a player is in the fight area.",
               "proof": "none"
+            },
+            {
+              "check": "A player who comes back to the object that starts a quest fight gets the fight again (2026-11-27, tests only). Bug, seen live in `12A_MSQ_15_DefeatNavigator`: a player used the altar, died before the navigator's kill, and the altar stayed closed to that player, so the navigator's blunderbuss could not drop. The server now starts the object's event when such a player stands at it: the object's task is done, a kill, a kill's drop or a game event of the quest is still open, and no other wave of the event has started. 44 objectives of the game data have such an object. What retail does for a player in this state is Unknown: no capture shows one. Open: a real player ends the quest this way.",
+              "proof": "tests"
             }
           ]
         },

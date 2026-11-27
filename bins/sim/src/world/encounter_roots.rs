@@ -1136,14 +1136,24 @@ impl EncounterObjects {
         position: Position,
         radius_m: f32,
     ) -> impl Iterator<Item = u64> + 'a {
+        self.fresh_within(position, radius_m)
+            .filter(move |(number, _)| self.slice_of(*number) == Some(slice))
+            .map(|(number, _)| number)
+    }
+
+    /// The start objects that stand, not emptied, within `radius_m` of `position`, with their
+    /// places.
+    pub(super) fn fresh_within(
+        &self,
+        position: Position,
+        radius_m: f32,
+    ) -> impl Iterator<Item = (u64, Position)> + '_ {
         self.objects
             .iter()
             .filter(move |(_, object)| {
-                !object.depleted
-                    && object.slice == slice
-                    && object.position.horizontal_distance(position) <= radius_m
+                !object.depleted && object.position.horizontal_distance(position) <= radius_m
             })
-            .map(|(number, _)| *number)
+            .map(|(number, object)| (*number, object.position))
     }
 
     /// A player's gather of start object `number` starts: its interact state counts one

@@ -244,6 +244,14 @@ const WATER_GATHERABLE: &str = "Water";
 /// client's interaction reach is Unknown here; generous, so a large node such as a tree, whose
 /// level point is its trunk, and a position a moment old still pass).
 const GATHER_REACH_M: f32 = 15.0;
+/// How far from the place of its quest task a start object may stand to be that task's object.
+/// Inferred: the altar of `12A_MSQ_15_DefeatNavigator` stands 6.8 m from its task's
+/// `OverrideLocation` (encounter spawn 7820.244 4212.967, task 7821.835 4206.391).
+const OWED_OBJECT_PLACE_M: f32 = 10.0;
+/// How near a player must be to a closed start object whose fight it still owes for the object's
+/// event to start. Inferred: the `InteractionRadius` of the altar's variant
+/// (`MB_MSQ2_DefeatNavigator_Altar`, 3.25 m); the player stands where it would use the object.
+const OWED_OBJECT_REACH_M: f32 = 3.25;
 
 /// The stack a gather's yield share `scale` makes of a stack of `quantity`: the whole part of
 /// `quantity x scale`, and one more when `below(n)` (a number below `n`) falls under its
@@ -1140,6 +1148,7 @@ impl SimWorld {
     pub(super) fn gathers_due(&mut self, now_ms: u64) {
         self.nodes.tick(now_ms);
         self.encounter_objects.tick(now_ms);
+        self.use_owed_objects(now_ms);
         let (mobs, objects) = (&self.mobs, &self.encounter_objects);
         self.kept_gathers.retain(|kept| {
             kept.mob.is_none_or(|mob| mobs.health(mob) == Some(0))
@@ -1164,6 +1173,66 @@ impl SimWorld {
             };
             self.end_gather(&gather, ended_before, now_ms);
         }
+    }
+
+    /// A start object that a living player stands at goes as if that player had gathered it,
+    /// when the player's quest closed the object to it and still waits for the fight the object
+    /// starts ([`ObjectiveRun::owed_interacts`]): the object's stage ends and its event runs
+    /// again. The player's own task of the object is done, so no game event and no loot go to it.
+    /// Only the object that starts an event goes ([`super::dungeon_script::DungeonRun::starts_its_event`]),
+    /// and only for a task whose tag is a gatherable's: an object a later stage spawns (the
+    /// altar's rubble) and a breach's objects are the player's own to use.
+    fn use_owed_objects(&mut self, now_ms: u64) {
+        for (number, object) in self.owed_objects() {
+            let in_use = self
+                .open_gathers
+                .iter()
+                .any(|gather| gather.object() == Some(object));
+            let starts = self
+                .world_events
+                .as_ref()
+                .is_some_and(|run| run.starts_its_event(object));
+            if starts && !in_use {
+                tracing::info!(
+                    player = number,
+                    object,
+                    "owed start object used for its player"
+                );
+                self.encounter_objects.gathered(object, now_ms);
+            }
+        }
+    }
+
+    /// The standing start objects whose fight a living player at them still owes: each player
+    /// and object, an object once.
+    fn owed_objects(&mut self) -> Vec<(u64, u64)> {
+        let mut query = self.world.query::<(&Player, &Body, &super::Vitals)>();
+        let players: Vec<(u64, Position)> = query
+            .iter(&self.world)
+            .filter(|(_, _, vitals)| !vitals.fallen())
+            .map(|(player, body, _)| (player.number, body.motion.position()))
+            .collect();
+        let mut owed: Vec<(u64, u64)> = players
+            .into_iter()
+            .flat_map(|(number, at)| {
+                self.quests_of_player(number)
+                    .iter()
+                    .flat_map(|quest| quest.run.owed_interacts())
+                    .filter(|(_, tag)| !self.content.interact_tags.gatherables_with(tag).is_empty())
+                    .flat_map(|(place, _)| {
+                        self.encounter_objects
+                            .fresh_within(place, OWED_OBJECT_PLACE_M)
+                    })
+                    .filter(move |(_, stands)| {
+                        stands.horizontal_distance(at) <= OWED_OBJECT_REACH_M
+                    })
+                    .map(move |(object, _)| (number, object))
+            })
+            .collect();
+        // One use of an object, also for two players or two quests at it.
+        owed.sort_unstable_by_key(|(_, object)| *object);
+        owed.dedup_by_key(|(_, object)| *object);
+        owed
     }
 
     /// The corpses whose time came at `now_ms` go (`nw_content::corpse_times`): a
@@ -3677,6 +3746,107 @@ pub(crate) mod tests {
             gather.end_ms,
             NOW + VEIN_MS.div_ceil(GATHER_TICK_MS) * GATHER_TICK_MS + GATHER_TICK_MS,
             "by hand: the tick after its time"
+        );
+    }
+
+    /// Bug, live 2026-11-27 (`12A_MSQ_15_DefeatNavigator`): the altar's task was done, the
+    /// navigator's drop was not there, and the altar stayed closed to the player.
+    #[test]
+    fn a_closed_start_object_is_owed_to_the_player_at_it_who_still_owes_its_fight() {
+        use crate::objectives::{TaskBook, TaskRow};
+        use crate::player_content::{ObjectiveRow, QuestBook};
+        use nw_content::interact_tags::{InteractTags, VariantTag};
+
+        use crate::world::encounter_roots::EncounterObjects;
+        const ALTAR: &str =
+            "slices/monarchsbluffs/ioquest/io_12a_defeatnavigator_12mb01_altar.dynamicslice";
+        const ALTAR_EVENT: &str = "MB_MSQ2_DefeatNavigator_Altar_interact";
+        const ALTAR_TAG: &str = "IO_MB_MSQ2_DefeatNavigator_Altar";
+        const ALTAR_GATHERABLE: &str = "MB_MSQ2_DefeatNavigator_Altar";
+        const QUEST: &str = "12a_msq_15_defeatnavigator";
+        /// Farther from the altar than a player who would use it.
+        const AWAY_M: f32 = 2.0 * OWED_OBJECT_REACH_M;
+        let (mut world, entity) = admitted();
+        let at = world
+            .world
+            .get::<Body>(entity)
+            .expect("body")
+            .motion
+            .position();
+        let task = |id: &str, kind: &str| TaskRow {
+            task_id: id.to_owned(),
+            kind: kind.to_owned(),
+            target_qty: Some(1),
+            ..TaskRow::default()
+        };
+        let mut content = (*world.content).clone();
+        content.quests = QuestBook::build(
+            [ObjectiveRow {
+                id: QUEST.to_owned(),
+                root: "Root".to_owned(),
+                ..ObjectiveRow::default()
+            }],
+            TaskBook::new(vec![
+                TaskRow {
+                    sub_tasks: vec!["Use".to_owned(), "Gun".to_owned()],
+                    ..task("Root", "ConsecutiveTaskContainer")
+                },
+                TaskRow {
+                    kill_enemy_type: Some(ALTAR_EVENT.to_owned()),
+                    interact_tag: Some(ALTAR_TAG.to_owned()),
+                    override_location: Some(format!("{} {} {}", at.x, at.y, at.z)),
+                    ..task("Use", "TaskGameEvent")
+                },
+                TaskRow {
+                    item_name: Some("12A_MSQ_15_PirateBlunderbuss".to_owned()),
+                    item_drop_vc: Some("Undead_Navigator_Named_12MB01d".to_owned()),
+                    item_drop_probability: Some(100),
+                    ..task("Gun", "TaskHaveAndReturnItems")
+                },
+            ]),
+        );
+        content.interact_tags = InteractTags::build(&HashMap::new(), [], []).with_gatherables([(
+            lowercase_crc32(ALTAR_GATHERABLE),
+            VariantTag {
+                tag: ALTAR_TAG.to_owned(),
+                only_on_quest: true,
+            },
+        )]);
+        world.content = Arc::new(content);
+        let table = nw_content::town_props::TownProps::parse(&format!(
+            r#"{{"props": [{{"asset": "11223344556677889900aabbccddeeff", "slice": "{ALTAR}",
+            "members": ["030c010104"]}}]}}"#
+        ))
+        .expect("table");
+        world.encounter_objects = EncounterObjects::build(&table);
+        let altar_at = |east_m: f32| [at.x + east_m, at.y, at.z];
+        world.start_quest(NUMBER, QUEST, NOW).expect("quest");
+        let open = world
+            .encounter_objects
+            .spawn(ALTAR, altar_at(0.0), 0.0)
+            .expect("altar");
+        assert_eq!(
+            world.owed_objects(),
+            [],
+            "the altar's task waits: the player uses the altar itself"
+        );
+        world.fire_game_event(NUMBER, ALTAR_EVENT, NOW);
+        world.encounter_objects.remove(open);
+        let far = world
+            .encounter_objects
+            .spawn(ALTAR, altar_at(AWAY_M), 0.0)
+            .expect("altar");
+        assert_eq!(world.owed_objects(), [], "the player is not at the altar");
+        let near = world
+            .encounter_objects
+            .spawn(ALTAR, altar_at(0.0), 0.0)
+            .expect("altar");
+        assert_eq!(world.owed_objects(), [(NUMBER, near)]);
+        assert!(world.encounter_objects.stands(far));
+        world.gathers_due(NOW);
+        assert!(
+            world.encounter_objects.stands(near),
+            "no event of this sim spawned the altar, so nothing uses it"
         );
     }
 
